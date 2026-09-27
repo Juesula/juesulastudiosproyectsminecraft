@@ -28,8 +28,8 @@ local CONFIG = {
     POSITION_CONSISTENCY_TOLERANCE = 1500,  -- Tolerancia entre |r|-R y distanceToPlanet
 
     -- CONTROL DE ASCENSO
-    ASCENT_MAX_VERTICAL_SPEED  = 18.0,  -- Velocidad vertical máxima permitida en ascenso
-    ASCENT_SLOW_VERTICAL_SPEED = 10.0,  -- Velocidad vertical de crucero objetivo
+    ASCENT_MAX_VERTICAL_SPEED  = 30.0,  -- Velocidad vertical máxima permitida en ascenso
+    ASCENT_SLOW_VERTICAL_SPEED = 30.0,  -- Velocidad vertical de crucero objetivo
     ASCENT_DEADBAND            = 0.5,   -- Margen/zona muerta de velocidad vertical objetivo
     ASCENT_KP                  = 0.12,  -- Ganancia proporcional de aceleración UP
     ASCENT_BRAKE_KP            = 0.18,  -- Ganancia proporcional de frenado DOWN
