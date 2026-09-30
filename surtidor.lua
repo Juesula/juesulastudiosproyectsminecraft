@@ -5,19 +5,23 @@
 -- 1 FuelToken = 1 Netherite Coin
 -- lightmanscurrency:coin_netherite
 --
--- CONTROLES:
---   F              = INICIAR / PARAR
---   CLICK BOTON    = INICIAR / PARAR
---   C              = ADMINISTRADOR
+-- CLIENTE:
+--   F           = INICIAR / PARAR
+--   CLICK       = INICIAR / PARAR
 --
 -- ADMIN:
---   PIN 2050
---   FLECHA ARRIBA/ABAJO = navegar
---   ENTER                = editar
---   ESC                  = guardar y salir
+--   Acceso oculto
+--   PIN: 2050
+--
+-- MENU ADMIN:
+--   ARRIBA / ABAJO = navegar
+--   ENTER           = seleccionar
+--   BACKSPACE       = guardar y salir
 -- ============================================================
 
+
 local CONFIG_FILE = "/surtidor.cfg"
+
 local ADMIN_PIN = "2050"
 
 local NETHERITE_COIN_ID =
@@ -25,54 +29,77 @@ local NETHERITE_COIN_ID =
 
 
 -- ============================================================
--- CONFIGURACION
+-- CONFIGURACION POR DEFECTO
 -- ============================================================
 
 local defaults = {
 
-    station_name = "SURTIDOR",
+    station_name =
+        "SURTIDOR",
 
-    token_name = "FuelToken",
+    token_name =
+        "FuelToken",
 
     token_item_id =
         NETHERITE_COIN_ID,
 
-    -- 1 FuelToken compra esta cantidad
-    mb_per_token = 1000,
+    -- Estado del surtidor
+    out_of_service =
+        false,
+
+    -- 1 FuelToken compra X mB
+    mb_per_token =
+        1000,
 
     -- Barril cliente / cambio
-    payment_side = "right",
+    payment_side =
+        "right",
 
-    -- Barril dinero cobrado
-    storage_side = "bottom",
+    -- Barril caja
+    storage_side =
+        "bottom",
 
     -- Valvula
-    open_side = "back",
-    close_side = "left",
+    open_side =
+        "back",
 
-    pulse_time = 0.15,
+    close_side =
+        "left",
+
+    pulse_time =
+        0.15,
 
     -- Lectura del deposito
-    sample_time = 0.20,
+    sample_time =
+        0.20,
 
-    -- Lecturas sin bajar antes
-    -- de considerar fin de flujo
-    no_flow_limit = 8,
+    -- Lecturas consecutivas
+    -- sin bajar antes de terminar
+    no_flow_limit =
+        8,
 
-    -- Ignorar cambios menores
-    flow_epsilon_mb = 1,
+    -- Diferencia minima
+    -- considerada movimiento
+    flow_epsilon_mb =
+        1,
 
     -- Tiempo de gracia al abrir
-    -- antes de comprobar falta de flujo
-    flow_grace_time = 1.0,
+    flow_grace_time =
+        1.0,
 
     -- Rednet
-    protocol = "surtidor_tanque",
-    tank_host = "tanque_1",
-    tank_timeout = 2.0,
+    protocol =
+        "surtidor_tanque",
 
-    -- Cambio
-    change_retry_time = 0.5,
+    tank_host =
+        "tanque_1",
+
+    tank_timeout =
+        2.0,
+
+    -- Reintento del cambio
+    change_retry_time =
+        0.5,
 }
 
 
@@ -82,24 +109,33 @@ local defaults = {
 
 local cfg = {}
 
-local tankID = nil
+local tankID =
+    nil
 
-local payment = nil
-local storage = nil
+local payment =
+    nil
 
-local paymentName = nil
-local storageName = nil
+local storage =
+    nil
+
+local paymentName =
+    nil
+
+local storageName =
+    nil
+
 
 local buttonBounds = {
+
     x1 = 1,
     x2 = 1,
     y1 = 1,
-    y2 = 1
+    y2 = 1,
 }
 
 
 -- ============================================================
--- TERMINAL / COLORES
+-- TERMINAL
 -- ============================================================
 
 local function hasColor()
@@ -128,7 +164,11 @@ local function clear()
     resetColors()
 
     term.clear()
-    term.setCursorPos(1, 1)
+
+    term.setCursorPos(
+        1,
+        1
+    )
 end
 
 
@@ -143,30 +183,45 @@ local function writeAt(
     local w, h =
         term.getSize()
 
-    if y < 1 or y > h then
+
+    if y < 1 or
+        y > h
+    then
         return
     end
+
 
     if x < 1 then
         x = 1
     end
 
-    text =
-        tostring(text or "")
 
     if x > w then
         return
     end
 
+
+    text =
+        tostring(
+            text or ""
+        )
+
+
     if #text >
-        (w - x + 1)
+        (
+            w -
+            x +
+            1
+        )
     then
 
         text =
             string.sub(
                 text,
                 1,
-                w - x + 1
+                w -
+                x +
+                1
             )
     end
 
@@ -174,11 +229,18 @@ local function writeAt(
     if hasColor() then
 
         if bg then
-            term.setBackgroundColor(bg)
+
+            term.setBackgroundColor(
+                bg
+            )
         end
 
+
         if fg then
-            term.setTextColor(fg)
+
+            term.setTextColor(
+                fg
+            )
         end
     end
 
@@ -188,7 +250,10 @@ local function writeAt(
         y
     )
 
-    term.write(text)
+    term.write(
+        text
+    )
+
 
     resetColors()
 end
@@ -207,17 +272,28 @@ local function centerText(
             term.getSize()
         )
 
+
     text =
-        tostring(text)
+        tostring(
+            text
+        )
+
 
     local x =
         math.floor(
-            (w - #text) / 2
-        ) + 1
+            (
+                w -
+                #text
+            ) /
+            2
+        ) +
+        1
+
 
     if x < 1 then
         x = 1
     end
+
 
     writeAt(
         x,
@@ -240,14 +316,20 @@ local function fillLine(
             term.getSize()
         )
 
+
     if hasColor() then
-        term.setBackgroundColor(bg)
+
+        term.setBackgroundColor(
+            bg
+        )
     end
+
 
     term.setCursorPos(
         1,
         y
     )
+
 
     term.write(
         string.rep(
@@ -255,6 +337,7 @@ local function fillLine(
             w
         )
     )
+
 
     resetColors()
 end
@@ -264,11 +347,17 @@ end
 -- UTILIDADES
 -- ============================================================
 
-local function normalizeID(value)
+local function normalizeID(
+    value
+)
 
-    if type(value) ~= "string" then
+    if type(value) ~=
+        "string"
+    then
+
         return ""
     end
+
 
     value =
         value:gsub(
@@ -276,11 +365,13 @@ local function normalizeID(value)
             ""
         )
 
+
     value =
         value:gsub(
             "%s+$",
             ""
         )
+
 
     return string.lower(
         value
@@ -288,45 +379,60 @@ local function normalizeID(value)
 end
 
 
-local function isFuelToken(item)
+local function isFuelToken(
+    item
+)
 
-    if type(item) ~= "table" then
+    if type(item) ~=
+        "table"
+    then
+
         return false
     end
+
 
     local id =
         normalizeID(
             item.name
         )
 
+
     if id ==
         normalizeID(
             cfg.token_item_id
         )
     then
+
         return true
     end
 
-    -- Siempre aceptar Netherite Coin
+
+    -- Netherite Coin siempre valida
     if id ==
         NETHERITE_COIN_ID
     then
+
         return true
     end
+
 
     return false
 end
 
 
 -- ============================================================
--- CONFIG
+-- CONFIGURACION
 -- ============================================================
 
 local function copyDefaults()
 
     cfg = {}
 
-    for k, v in pairs(defaults) do
+
+    for k, v in pairs(
+        defaults
+    ) do
+
         cfg[k] = v
     end
 end
@@ -340,16 +446,22 @@ local function saveConfig()
             "w"
         )
 
+
     if not file then
+
         error(
             "No se pudo guardar " ..
             CONFIG_FILE
         )
     end
 
+
     file.write(
-        textutils.serialize(cfg)
+        textutils.serialize(
+            cfg
+        )
     )
+
 
     file.close()
 end
@@ -358,6 +470,7 @@ end
 local function loadConfig()
 
     copyDefaults()
+
 
     if fs.exists(
         CONFIG_FILE
@@ -369,6 +482,7 @@ local function loadConfig()
                 "r"
             )
 
+
         if file then
 
             local data =
@@ -376,7 +490,9 @@ local function loadConfig()
                     file.readAll()
                 )
 
+
             file.close()
+
 
             if type(data) ==
                 "table"
@@ -385,24 +501,31 @@ local function loadConfig()
                 -- Migracion antigua
 
                 if data.coin_id then
+
                     cfg.token_item_id =
                         data.coin_id
                 end
 
+
                 if data.currency_name then
+
                     cfg.token_name =
                         data.currency_name
                 end
 
+
                 if data.mb_per_coin then
+
                     cfg.mb_per_token =
                         data.mb_per_coin
                 end
 
 
-                -- Config actual
+                -- Configuracion actual
 
-                for k, v in pairs(data) do
+                for k, v in pairs(
+                    data
+                ) do
 
                     if defaults[k] ~=
                         nil
@@ -416,13 +539,16 @@ local function loadConfig()
     end
 
 
+    -- Reparar ID antiguo
+
     if normalizeID(
         cfg.token_item_id
     ) == ""
         or
         normalizeID(
             cfg.token_item_id
-        ) == "cambiar_esto"
+        ) ==
+            "cambiar_esto"
     then
 
         cfg.token_item_id =
@@ -430,7 +556,8 @@ local function loadConfig()
     end
 
 
-    if cfg.token_name == ""
+    if cfg.token_name ==
+        ""
         or
         cfg.token_name ==
             "monedas"
@@ -456,12 +583,19 @@ local function openModems()
     ) do
 
         local types = {
-            peripheral.getType(name)
+            peripheral.getType(
+                name
+            )
         }
 
-        for _, t in ipairs(types) do
 
-            if t == "modem" then
+        for _, t in ipairs(
+            types
+        ) do
+
+            if t ==
+                "modem"
+            then
 
                 pcall(
                     rednet.open,
@@ -484,6 +618,7 @@ local function refreshInventories()
             cfg.payment_side
         )
 
+
     storage =
         peripheral.wrap(
             cfg.storage_side
@@ -498,7 +633,9 @@ local function refreshInventories()
             )
 
     else
-        paymentName = nil
+
+        paymentName =
+            nil
     end
 
 
@@ -510,37 +647,53 @@ local function refreshInventories()
             )
 
     else
-        storageName = nil
+
+        storageName =
+            nil
     end
 
 
     if payment and
         (
-            type(payment.list) ~=
+            type(
+                payment.list
+            ) ~=
                 "function"
             or
-            type(payment.pushItems) ~=
+            type(
+                payment.pushItems
+            ) ~=
                 "function"
         )
     then
 
-        payment = nil
-        paymentName = nil
+        payment =
+            nil
+
+        paymentName =
+            nil
     end
 
 
     if storage and
         (
-            type(storage.list) ~=
+            type(
+                storage.list
+            ) ~=
                 "function"
             or
-            type(storage.pushItems) ~=
+            type(
+                storage.pushItems
+            ) ~=
                 "function"
         )
     then
 
-        storage = nil
-        storageName = nil
+        storage =
+            nil
+
+        storageName =
+            nil
     end
 end
 
@@ -550,6 +703,7 @@ local function autoRepairTokenID()
     if not payment then
         return
     end
+
 
     for _, item in pairs(
         payment.list()
@@ -570,11 +724,14 @@ local function autoRepairTokenID()
                 cfg.token_item_id =
                     NETHERITE_COIN_ID
 
+
                 cfg.token_name =
                     "FuelToken"
 
+
                 saveConfig()
             end
+
 
             return
         end
@@ -586,16 +743,20 @@ end
 -- VALVULA
 -- ============================================================
 
-local function pulse(side)
+local function pulse(
+    side
+)
 
     redstone.setOutput(
         side,
         true
     )
 
+
     sleep(
         cfg.pulse_time
     )
+
 
     redstone.setOutput(
         side,
@@ -621,7 +782,7 @@ end
 
 
 -- ============================================================
--- INTERFAZ PRINCIPAL
+-- BOTON VISUAL
 -- ============================================================
 
 local function drawButton(
@@ -632,7 +793,9 @@ local function drawButton(
     local w, h =
         term.getSize()
 
+
     local label
+
 
     if running then
 
@@ -648,43 +811,54 @@ local function drawButton(
 
     local x =
         math.floor(
-            (w - #label) / 2
-        ) + 1
+            (
+                w -
+                #label
+            ) /
+            2
+        ) +
+        1
+
 
     local y =
-        h - 2
+        h -
+        1
 
 
-    buttonBounds.x1 = x
+    buttonBounds.x1 =
+        x
+
     buttonBounds.x2 =
-        x + #label - 1
+        x +
+        #label -
+        1
 
-    buttonBounds.y1 = y
-    buttonBounds.y2 = y
+    buttonBounds.y1 =
+        y
+
+    buttonBounds.y2 =
+        y
 
 
-    local background =
+    local bg =
         colors.gray
-
-    local foreground =
-        colors.white
 
 
     if hasColor() then
 
         if running then
 
-            background =
+            bg =
                 colors.red
 
         elseif enabled then
 
-            background =
+            bg =
                 colors.green
 
         else
 
-            background =
+            bg =
                 colors.gray
         end
     end
@@ -694,8 +868,8 @@ local function drawButton(
         x,
         y,
         label,
-        foreground,
-        background
+        colors.white,
+        bg
     )
 end
 
@@ -706,22 +880,25 @@ local function buttonClicked(
 )
 
     return
-        x >= buttonBounds.x1
+        x >=
+            buttonBounds.x1
         and
-        x <= buttonBounds.x2
+        x <=
+            buttonBounds.x2
         and
-        y >= buttonBounds.y1
+        y >=
+            buttonBounds.y1
         and
-        y <= buttonBounds.y2
+        y <=
+            buttonBounds.y2
 end
 
 
-local function drawMain(
-    state
-)
+-- ============================================================
+-- PANTALLA FUERA DE SERVICIO
+-- ============================================================
 
-    state =
-        state or {}
+local function drawOutOfService()
 
     local w, h =
         term.getSize()
@@ -730,9 +907,78 @@ local function drawMain(
     clear()
 
 
-    -- ========================================
-    -- CABECERA
-    -- ========================================
+    if hasColor() then
+
+        fillLine(
+            1,
+            colors.red
+        )
+
+
+        centerText(
+            1,
+            cfg.station_name,
+            colors.white,
+            colors.red
+        )
+
+    else
+
+        centerText(
+            1,
+            cfg.station_name
+        )
+    end
+
+
+    centerText(
+        math.floor(
+            h / 2
+        ) -
+        1,
+        "FUERA DE SERVICIO",
+        colors.red
+    )
+
+
+    centerText(
+        math.floor(
+            h / 2
+        ) +
+        1,
+        "Disculpe las molestias"
+    )
+end
+
+
+-- ============================================================
+-- INTERFAZ PRINCIPAL
+-- ============================================================
+
+local function drawMain(
+    state
+)
+
+    state =
+        state or {}
+
+
+    if cfg.out_of_service then
+
+        drawOutOfService()
+
+        return
+    end
+
+
+    local w, h =
+        term.getSize()
+
+
+    clear()
+
+
+    -- Cabecera
 
     if hasColor() then
 
@@ -740,6 +986,7 @@ local function drawMain(
             1,
             colors.blue
         )
+
 
         centerText(
             1,
@@ -769,9 +1016,7 @@ local function drawMain(
     )
 
 
-    -- ========================================
-    -- ESTADO
-    -- ========================================
+    -- Estado
 
     local status =
         state.status
@@ -814,23 +1059,31 @@ local function drawMain(
     )
 
 
-    -- ========================================
-    -- DATOS
-    -- ========================================
+    -- Datos
 
     local credit =
-        state.credit or 0
+        state.credit
+        or
+        0
+
 
     local served =
-        state.served or 0
+        state.served
+        or
+        0
+
 
     local cost =
-        state.cost or 0
+        state.cost
+        or
+        0
+
 
     local remaining =
         math.max(
             0,
-            credit - cost
+            credit -
+            cost
         )
 
 
@@ -840,10 +1093,13 @@ local function drawMain(
         "CREDITO"
     )
 
+
     writeAt(
         16,
         5,
-        tostring(credit) ..
+        tostring(
+            credit
+        ) ..
         " FT",
         colors.yellow
     )
@@ -855,10 +1111,13 @@ local function drawMain(
         "SUMINISTRADO"
     )
 
+
     writeAt(
         16,
         6,
-        tostring(served) ..
+        tostring(
+            served
+        ) ..
         " mB",
         colors.cyan
     )
@@ -870,10 +1129,13 @@ local function drawMain(
         "COSTE"
     )
 
+
     writeAt(
         16,
         7,
-        tostring(cost) ..
+        tostring(
+            cost
+        ) ..
         " FT",
         colors.orange
     )
@@ -885,22 +1147,28 @@ local function drawMain(
         "RESTANTE"
     )
 
+
     writeAt(
         16,
         8,
-        tostring(remaining) ..
+        tostring(
+            remaining
+        ) ..
         " FT",
         colors.lime
     )
 
 
-    if state.tankAmount ~= nil then
+    if state.tankAmount ~=
+        nil
+    then
 
         writeAt(
             2,
             10,
             "DEPOSITO"
         )
+
 
         local tankText =
             tostring(
@@ -909,13 +1177,15 @@ local function drawMain(
             " mB"
 
 
-        if state.tankCapacity and
-            state.tankCapacity > 0
+        if state.tankCapacity
+            and
+            state.tankCapacity >
+                0
         then
 
             tankText =
                 tankText ..
-                " / " ..
+                "/" ..
                 tostring(
                     state.tankCapacity
                 )
@@ -930,15 +1200,12 @@ local function drawMain(
     end
 
 
-    -- ========================================
-    -- PRECIO
-    -- ========================================
-
     writeAt(
         2,
         12,
-        "PRECIO:"
+        "PRECIO"
     )
+
 
     writeAt(
         10,
@@ -951,9 +1218,7 @@ local function drawMain(
     )
 
 
-    -- ========================================
-    -- MENSAJE
-    -- ========================================
+    -- Mensaje inferior
 
     if state.message then
 
@@ -962,11 +1227,14 @@ local function drawMain(
                 state.message
             )
 
+
         local maxLength =
             math.max(
                 1,
-                w - 4
+                w -
+                4
             )
+
 
         local line1 =
             string.sub(
@@ -975,8 +1243,10 @@ local function drawMain(
                 maxLength
             )
 
+
         local line2 =
             ""
+
 
         if #message >
             maxLength
@@ -985,43 +1255,41 @@ local function drawMain(
             line2 =
                 string.sub(
                     message,
-                    maxLength + 1,
-                    maxLength * 2
+                    maxLength +
+                    1,
+                    maxLength *
+                    2
                 )
         end
 
 
         writeAt(
             2,
-            h - 5,
+            h -
+            4,
             line1
         )
 
-        if line2 ~= "" then
+
+        if line2 ~=
+            ""
+        then
 
             writeAt(
                 2,
-                h - 4,
+                h -
+                3,
                 line2
             )
         end
     end
 
 
-    -- ========================================
-    -- BOTON
-    -- ========================================
-
     drawButton(
-        state.running == true,
-        credit > 0
-    )
-
-
-    centerText(
-        h,
-        "[C] ADMIN",
-        colors.lightGray
+        state.running ==
+            true,
+        credit >
+            0
     )
 
 
@@ -1030,7 +1298,7 @@ end
 
 
 -- ============================================================
--- INPUT ADMIN
+-- CAMPOS ADMIN
 -- ============================================================
 
 local validSides = {
@@ -1040,7 +1308,7 @@ local validSides = {
     top = true,
     bottom = true,
     front = true,
-    back = true
+    back = true,
 }
 
 
@@ -1051,29 +1319,41 @@ local function promptText(
 
     clear()
 
+
     centerText(
         1,
         title
     )
+
 
     print("")
     print(
         "Actual:"
     )
 
+
     print(
-        tostring(current)
+        tostring(
+            current
+        )
     )
+
 
     print("")
     write("> ")
 
+
     local value =
         read()
 
-    if value == "" then
+
+    if value ==
+        ""
+    then
+
         return current
     end
+
 
     return value
 end
@@ -1091,8 +1371,13 @@ local function promptNumber(
             current
         )
 
-    if tostring(value) ==
-        tostring(current)
+
+    if tostring(
+        value
+    ) ==
+        tostring(
+            current
+        )
     then
 
         return current
@@ -1100,7 +1385,10 @@ local function promptNumber(
 
 
     local number =
-        tonumber(value)
+        tonumber(
+            value
+        )
+
 
     if not number then
 
@@ -1116,15 +1404,19 @@ local function promptNumber(
     end
 
 
-    if minimum and
-        number < minimum
+    if minimum
+        and
+        number <
+            minimum
     then
 
         clear()
 
         print(
             "Valor minimo: " ..
-            tostring(minimum)
+            tostring(
+                minimum
+            )
         )
 
         sleep(1)
@@ -1151,7 +1443,10 @@ local function promptSide(
         )
 
 
-    if validSides[value] then
+    if validSides[
+        value
+    ] then
+
         return value
     end
 
@@ -1187,7 +1482,9 @@ local function promptSide(
         "back"
     )
 
+
     sleep(2)
+
 
     return current
 end
@@ -1203,12 +1500,13 @@ local function diagnosticCoins()
 
     clear()
 
+
     print(
-        "DIAGNOSTICO DE MONEDAS"
+        "DIAGNOSTICO MONEDAS"
     )
 
     print(
-        "----------------------"
+        "-------------------"
     )
 
     print("")
@@ -1217,7 +1515,7 @@ local function diagnosticCoins()
     if not payment then
 
         print(
-            "No encuentro el barril de pago."
+            "No encuentro barril."
         )
 
         print("")
@@ -1225,7 +1523,9 @@ local function diagnosticCoins()
             "Pulsa una tecla..."
         )
 
-        os.pullEvent("key")
+        os.pullEvent(
+            "key"
+        )
 
         return
     end
@@ -1245,8 +1545,11 @@ local function diagnosticCoins()
 
         print(
             "Slot " ..
-            tostring(slot)
+            tostring(
+                slot
+            )
         )
+
 
         print(
             tostring(
@@ -1254,6 +1557,7 @@ local function diagnosticCoins()
             ) ..
             "x"
         )
+
 
         print(
             tostring(
@@ -1267,15 +1571,16 @@ local function diagnosticCoins()
         ) then
 
             print(
-                ">> FUELTOKEN VALIDO"
+                "FUELTOKEN VALIDO"
             )
 
         else
 
             print(
-                ">> NO VALIDO"
+                "NO VALIDO"
             )
         end
+
 
         print("")
     end
@@ -1289,21 +1594,73 @@ local function diagnosticCoins()
     end
 
 
+    print("")
     print(
         "Pulsa una tecla..."
     )
 
-    os.pullEvent("key")
+
+    os.pullEvent(
+        "key"
+    )
 end
 
 
 -- ============================================================
--- MENU ADMIN CON SCROLL
+-- OPCIONES ADMIN
 -- ============================================================
 
 local function adminOptions()
 
     return {
+
+        -- ========================================
+        -- ESTADO
+        -- ========================================
+
+        {
+            label =
+                "Estado surtidor",
+
+            value =
+                function()
+
+                    if cfg.out_of_service then
+
+                        return
+                            "FUERA DE SERVICIO"
+                    end
+
+
+                    return
+                        "OPERATIVO"
+                end,
+
+            edit =
+                function()
+
+                    cfg.out_of_service =
+                        not
+                        cfg.out_of_service
+
+
+                    -- Si pasa fuera de servicio,
+                    -- asegurar valvula cerrada.
+
+                    if cfg.out_of_service then
+
+                        closeValve()
+                    end
+
+
+                    saveConfig()
+                end
+        },
+
+
+        -- ========================================
+        -- NOMBRE
+        -- ========================================
 
         {
             label =
@@ -1311,7 +1668,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.station_name
+
+                    return
+                        cfg.station_name
                 end,
 
             edit =
@@ -1326,13 +1685,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- TOKEN
+        -- ========================================
+
         {
             label =
                 "Nombre token",
 
             value =
                 function()
-                    return cfg.token_name
+
+                    return
+                        cfg.token_name
                 end,
 
             edit =
@@ -1353,7 +1718,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.token_item_id
+
+                    return
+                        cfg.token_item_id
                 end,
 
             edit =
@@ -1376,7 +1743,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.mb_per_token
+
+                    return
+                        cfg.mb_per_token
                 end,
 
             edit =
@@ -1392,13 +1761,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- INVENTARIOS
+        -- ========================================
+
         {
             label =
                 "Barril pago",
 
             value =
                 function()
-                    return cfg.payment_side
+
+                    return
+                        cfg.payment_side
                 end,
 
             edit =
@@ -1419,7 +1794,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.storage_side
+
+                    return
+                        cfg.storage_side
                 end,
 
             edit =
@@ -1434,13 +1811,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- VALVULA
+        -- ========================================
+
         {
             label =
                 "Abrir valvula",
 
             value =
                 function()
-                    return cfg.open_side
+
+                    return
+                        cfg.open_side
                 end,
 
             edit =
@@ -1461,7 +1844,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.close_side
+
+                    return
+                        cfg.close_side
                 end,
 
             edit =
@@ -1482,7 +1867,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.pulse_time
+
+                    return
+                        cfg.pulse_time
                 end,
 
             edit =
@@ -1498,13 +1885,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- MEDICION
+        -- ========================================
+
         {
             label =
                 "Intervalo lectura",
 
             value =
                 function()
-                    return cfg.sample_time
+
+                    return
+                        cfg.sample_time
                 end,
 
             edit =
@@ -1526,7 +1919,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.no_flow_limit
+
+                    return
+                        cfg.no_flow_limit
                 end,
 
             edit =
@@ -1550,7 +1945,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.flow_epsilon_mb
+
+                    return
+                        cfg.flow_epsilon_mb
                 end,
 
             edit =
@@ -1572,7 +1969,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.flow_grace_time
+
+                    return
+                        cfg.flow_grace_time
                 end,
 
             edit =
@@ -1580,7 +1979,7 @@ local function adminOptions()
 
                     cfg.flow_grace_time =
                         promptNumber(
-                            "Gracia inicial segundos",
+                            "Gracia inicial",
                             cfg.flow_grace_time,
                             0
                         )
@@ -1588,13 +1987,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- REDNET
+        -- ========================================
+
         {
             label =
                 "Protocolo",
 
             value =
                 function()
-                    return cfg.protocol
+
+                    return
+                        cfg.protocol
                 end,
 
             edit =
@@ -1602,11 +2007,12 @@ local function adminOptions()
 
                     cfg.protocol =
                         promptText(
-                            "Protocolo Rednet",
+                            "Protocolo",
                             cfg.protocol
                         )
 
-                    tankID = nil
+                    tankID =
+                        nil
                 end
         },
 
@@ -1617,7 +2023,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.tank_host
+
+                    return
+                        cfg.tank_host
                 end,
 
             edit =
@@ -1629,7 +2037,8 @@ local function adminOptions()
                             cfg.tank_host
                         )
 
-                    tankID = nil
+                    tankID =
+                        nil
                 end
         },
 
@@ -1640,7 +2049,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return cfg.tank_timeout
+
+                    return
+                        cfg.tank_timeout
                 end,
 
             edit =
@@ -1656,13 +2067,19 @@ local function adminOptions()
         },
 
 
+        -- ========================================
+        -- ACCIONES
+        -- ========================================
+
         {
             label =
                 "Restaurar Netherite Coin",
 
             value =
                 function()
-                    return "ACCION"
+
+                    return
+                        "EJECUTAR"
                 end,
 
             edit =
@@ -1671,16 +2088,21 @@ local function adminOptions()
                     cfg.token_item_id =
                         NETHERITE_COIN_ID
 
+
                     cfg.token_name =
                         "FuelToken"
 
+
                     saveConfig()
+
 
                     clear()
 
-                    print(
-                        "Netherite Coin restaurada."
+                    centerText(
+                        5,
+                        "Netherite Coin restaurada"
                     )
+
 
                     sleep(1)
                 end
@@ -1693,7 +2115,9 @@ local function adminOptions()
 
             value =
                 function()
-                    return "ABRIR"
+
+                    return
+                        "ABRIR"
                 end,
 
             edit =
@@ -1701,10 +2125,34 @@ local function adminOptions()
 
                     diagnosticCoins()
                 end
+        },
+
+
+        -- ========================================
+        -- SALIR
+        -- ========================================
+
+        {
+            label =
+                "GUARDAR Y SALIR",
+
+            value =
+                function()
+
+                    return
+                        ""
+                end,
+
+            exit =
+                true
         }
     }
 end
 
+
+-- ============================================================
+-- DIBUJAR MENU ADMIN
+-- ============================================================
 
 local function drawAdmin(
     selected,
@@ -1714,13 +2162,16 @@ local function drawAdmin(
     local options =
         adminOptions()
 
+
     local w, h =
         term.getSize()
+
 
     local visible =
         math.max(
             4,
-            h - 6
+            h -
+            6
         )
 
 
@@ -1734,9 +2185,10 @@ local function drawAdmin(
             colors.blue
         )
 
+
         centerText(
             1,
-            "ADMINISTRADOR",
+            "CONFIGURACION",
             colors.white,
             colors.blue
         )
@@ -1745,14 +2197,14 @@ local function drawAdmin(
 
         centerText(
             1,
-            "ADMINISTRADOR"
+            "CONFIGURACION"
         )
     end
 
 
     centerText(
         2,
-        "UP/DOWN + ENTER"
+        "FLECHAS + ENTER"
     )
 
 
@@ -1777,6 +2229,7 @@ local function drawAdmin(
         local option =
             options[i]
 
+
         local value =
             tostring(
                 option.value()
@@ -1790,6 +2243,7 @@ local function drawAdmin(
         local fg =
             colors.white
 
+
         local bg =
             colors.black
 
@@ -1800,6 +2254,7 @@ local function drawAdmin(
 
             prefix =
                 "> "
+
 
             if hasColor() then
 
@@ -1812,11 +2267,23 @@ local function drawAdmin(
         end
 
 
-        local text =
-            prefix ..
-            option.label ..
-            ": " ..
-            value
+        local text
+
+
+        if option.exit then
+
+            text =
+                prefix ..
+                option.label
+
+        else
+
+            text =
+                prefix ..
+                option.label ..
+                ": " ..
+                value
+        end
 
 
         if #text >
@@ -1832,8 +2299,10 @@ local function drawAdmin(
         end
 
 
-        if hasColor() and
-            i == selected
+        if hasColor()
+            and
+            i ==
+                selected
         then
 
             fillLine(
@@ -1853,9 +2322,12 @@ local function drawAdmin(
 
 
         screenY =
-            screenY + 1
+            screenY +
+            1
     end
 
+
+    -- Indicadores scroll
 
     if firstVisible >
         1
@@ -1876,7 +2348,8 @@ local function drawAdmin(
 
         writeAt(
             w,
-            h - 2,
+            h -
+            1,
             "v",
             colors.yellow
         )
@@ -1885,7 +2358,7 @@ local function drawAdmin(
 
     centerText(
         h,
-        "ESC = GUARDAR Y SALIR",
+        "BACKSPACE = GUARDAR/SALIR",
         colors.lightGray
     )
 
@@ -1894,24 +2367,32 @@ local function drawAdmin(
 end
 
 
+-- ============================================================
+-- MENU ADMIN
+-- ============================================================
+
 local function adminMenu()
 
     clear()
 
+
     centerText(
         2,
-        "ADMINISTRADOR"
+        "ACCESO RESTRINGIDO"
     )
+
 
     centerText(
         4,
         "Introduce codigo"
     )
 
+
     term.setCursorPos(
         2,
         6
     )
+
 
     write(
         "PIN: "
@@ -1928,13 +2409,18 @@ local function adminMenu()
 
         clear()
 
+
         centerText(
             5,
             "CODIGO INCORRECTO",
             colors.red
         )
 
-        sleep(1.5)
+
+        sleep(
+            1.5
+        )
+
 
         return
     end
@@ -1942,6 +2428,7 @@ local function adminMenu()
 
     local selected =
         1
+
 
     local firstVisible =
         1
@@ -1951,6 +2438,7 @@ local function adminMenu()
 
         local options =
             adminOptions()
+
 
         local visible =
             drawAdmin(
@@ -1968,14 +2456,18 @@ local function adminMenu()
             "key"
         then
 
+            -- ====================================
             -- ARRIBA
+            -- ====================================
 
             if a ==
                 keys.up
             then
 
                 selected =
-                    selected - 1
+                    selected -
+                    1
+
 
                 if selected <
                     1
@@ -1986,14 +2478,18 @@ local function adminMenu()
                 end
 
 
+            -- ====================================
             -- ABAJO
+            -- ====================================
 
             elseif a ==
                 keys.down
             then
 
                 selected =
-                    selected + 1
+                    selected +
+                    1
+
 
                 if selected >
                     #options
@@ -2004,7 +2500,9 @@ local function adminMenu()
                 end
 
 
+            -- ====================================
             -- PAGE UP
+            -- ====================================
 
             elseif a ==
                 keys.pageUp
@@ -2018,7 +2516,9 @@ local function adminMenu()
                     )
 
 
+            -- ====================================
             -- PAGE DOWN
+            -- ====================================
 
             elseif a ==
                 keys.pageDown
@@ -2032,21 +2532,49 @@ local function adminMenu()
                     )
 
 
+            -- ====================================
             -- ENTER
+            -- ====================================
 
             elseif a ==
                 keys.enter
             then
 
-                options[
-                    selected
-                ].edit()
+                local option =
+                    options[
+                        selected
+                    ]
 
 
-            -- ESC
+                if option.exit then
+
+                    saveConfig()
+
+                    refreshInventories()
+
+                    autoRepairTokenID()
+
+                    tankID =
+                        nil
+
+                    return
+                end
+
+
+                if option.edit then
+
+                    option.edit()
+
+                    saveConfig()
+                end
+
+
+            -- ====================================
+            -- BACKSPACE
+            -- ====================================
 
             elseif a ==
-                keys.escape
+                keys.backspace
             then
 
                 saveConfig()
@@ -2055,24 +2583,30 @@ local function adminMenu()
 
                 autoRepairTokenID()
 
-                tankID = nil
+                tankID =
+                    nil
 
                 return
             end
 
 
-        -- RUEDA RATON OPCIONAL
+        -- ========================================
+        -- RUEDA RATON
+        -- ========================================
 
         elseif event ==
             "mouse_scroll"
         then
 
-            if a > 0 then
+            if a >
+                0
+            then
 
                 selected =
                     math.min(
                         #options,
-                        selected + 1
+                        selected +
+                        1
                     )
 
             else
@@ -2080,13 +2614,16 @@ local function adminMenu()
                 selected =
                     math.max(
                         1,
-                        selected - 1
+                        selected -
+                        1
                     )
             end
         end
 
 
-        -- Ajustar scroll
+        -- ========================================
+        -- AJUSTAR SCROLL
+        -- ========================================
 
         if selected <
             firstVisible
@@ -2109,8 +2646,12 @@ local function adminMenu()
         end
 
 
-        if selected == 1 then
-            firstVisible = 1
+        if selected ==
+            1
+        then
+
+            firstVisible =
+                1
         end
     end
 end
@@ -2128,7 +2669,10 @@ local function findTankComputer()
             cfg.tank_host
         )
 
-    return tankID ~= nil
+
+    return
+        tankID ~=
+        nil
 end
 
 
@@ -2139,15 +2683,20 @@ local function isStopInput(
     c
 )
 
+    -- F
+
     if event ==
         "key"
         and
-        a == keys.f
+        a ==
+            keys.f
     then
 
         return true
     end
 
+
+    -- Click boton
 
     if event ==
         "mouse_click"
@@ -2192,6 +2741,7 @@ local function sendTankCommand(
 
 
     if not waitReply then
+
         return true
     end
 
@@ -2229,16 +2779,20 @@ local function sendTankCommand(
         elseif event ==
             "timer"
             and
-            a == timer
+            a ==
+                timer
         then
 
-            tankID = nil
+            tankID =
+                nil
+
 
             return nil,
                 "TIMEOUT"
 
 
-        elseif allowStop and
+        elseif allowStop
+            and
             isStopInput(
                 event,
                 a,
@@ -2268,7 +2822,9 @@ local function readTank(
 
 
     if not message then
-        return nil, err
+
+        return nil,
+            err
     end
 
 
@@ -2294,7 +2850,8 @@ local function readTank(
 
     if type(
         message.amount
-    ) ~= "number"
+    ) ~=
+        "number"
     then
 
         return nil,
@@ -2315,6 +2872,7 @@ local function countTokens(
 )
 
     if not inventory then
+
         return 0
     end
 
@@ -2330,6 +2888,39 @@ local function countTokens(
         if isFuelToken(
             item
         ) then
+
+            total =
+                total +
+                item.count
+        end
+    end
+
+
+    return total
+end
+
+
+local function countInvalidItems()
+
+    if not payment then
+
+        return 0
+    end
+
+
+    local total =
+        0
+
+
+    for _, item in pairs(
+        payment.list()
+    ) do
+
+        if not
+            isFuelToken(
+                item
+            )
+        then
 
             total =
                 total +
@@ -2376,7 +2967,10 @@ local function moveTokens(
                 moved
 
 
-            if remaining <= 0 then
+            if remaining <=
+                0
+            then
+
                 break
             end
 
@@ -2399,6 +2993,7 @@ local function moveTokens(
 
 
             if not ok then
+
                 return moved
             end
 
@@ -2407,7 +3002,8 @@ local function moveTokens(
                 moved +
                 (
                     quantity
-                    or 0
+                    or
+                    0
                 )
         end
     end
@@ -2449,10 +3045,12 @@ local function reserveCredit(
     end
 
 
-    -- Si solo movio una parte,
+    -- Si solo paso parte,
     -- devolverla.
 
-    if moved > 0 then
+    if moved >
+        0
+    then
 
         moveTokens(
             storage,
@@ -2498,7 +3096,9 @@ local function finishChange(
         amount
 
 
-    while pending > 0 do
+    while pending >
+        0
+    do
 
         local returned =
             returnChange(
@@ -2511,23 +3111,26 @@ local function finishChange(
             returned
 
 
-        if pending > 0 then
+        if pending >
+            0
+        then
 
             drawMain({
 
                 status =
                     "CAMBIO PENDIENTE",
 
-                credit = 0,
+                credit =
+                    0,
 
-                served = 0,
+                served =
+                    0,
 
-                cost = 0,
-
-                running = false,
+                cost =
+                    0,
 
                 message =
-                    "Libera espacio en el barril derecho."
+                    "Libera espacio en el barril derecho.",
             })
 
 
@@ -2540,8 +3143,7 @@ end
 
 
 -- ============================================================
--- ESPERAR SIGUIENTE LECTURA
--- PERO PERMITIENDO PARAR CON F/CLICK
+-- ESPERAR MUESTRA / PARADA
 -- ============================================================
 
 local function waitForSampleOrStop()
@@ -2564,10 +3166,12 @@ local function waitForSampleOrStop()
         if event ==
             "timer"
             and
-            a == timer
+            a ==
+                timer
         then
 
-            return "sample"
+            return
+                "sample"
         end
 
 
@@ -2579,7 +3183,8 @@ local function waitForSampleOrStop()
         )
         then
 
-            return "stop"
+            return
+                "stop"
         end
     end
 end
@@ -2593,16 +3198,23 @@ local function refuel(
     credit
 )
 
-    -- ========================================
-    -- CERRAR ANTES DE EMPEZAR
-    -- ========================================
+    -- Si alguien lo deja fuera de servicio
+    -- no debe empezar.
+
+    if cfg.out_of_service then
+
+        closeValve()
+
+        return
+    end
+
+
+    -- Seguridad
 
     closeValve()
 
 
-    -- ========================================
-    -- RESERVAR TODAS LAS MONEDAS
-    -- ========================================
+    -- Reservar pago
 
     if not
         reserveCredit(
@@ -2619,8 +3231,9 @@ local function refuel(
                 credit,
 
             message =
-                "No puedo mover las monedas al barril inferior."
+                "No puedo mover las monedas.",
         })
+
 
         sleep(3)
 
@@ -2628,9 +3241,7 @@ local function refuel(
     end
 
 
-    -- ========================================
-    -- AVISAR LECTOR
-    -- ========================================
+    -- Avisar lector
 
     sendTankCommand(
         "begin",
@@ -2639,9 +3250,7 @@ local function refuel(
     )
 
 
-    -- ========================================
-    -- LECTURA INICIAL
-    -- ========================================
+    -- Lectura inicial
 
     local first,
           firstError =
@@ -2650,14 +3259,12 @@ local function refuel(
         )
 
 
-    -- Pulsaste F antes incluso
-    -- de abrir la valvula.
-
     if firstError ==
         "USER_STOP"
     then
 
         closeValve()
+
 
         sendTankCommand(
             "end",
@@ -2665,9 +3272,11 @@ local function refuel(
             false
         )
 
+
         finishChange(
             credit
         )
+
 
         return
     end
@@ -2677,11 +3286,13 @@ local function refuel(
 
         closeValve()
 
+
         sendTankCommand(
             "end",
             false,
             false
         )
+
 
         finishChange(
             credit
@@ -2693,12 +3304,10 @@ local function refuel(
             status =
                 "ERROR TANQUE",
 
-            credit = 0,
-
             message =
                 tostring(
                     firstError
-                )
+                ),
         })
 
 
@@ -2711,32 +3320,39 @@ local function refuel(
     local initial =
         first.amount
 
+
     local previous =
         initial
+
 
     local lowest =
         initial
 
+
     local capacity =
-        first.capacity or 0
+        first.capacity
+        or
+        0
+
 
     local noFlow =
         0
+
 
     local maxFuel =
         credit *
         cfg.mb_per_token
 
+
     local reason =
         "FINALIZADO"
+
 
     local startedAt =
         os.clock()
 
 
-    -- ========================================
-    -- ABRIR
-    -- ========================================
+    -- Abrir
 
     drawMain({
 
@@ -2762,21 +3378,16 @@ local function refuel(
             true,
 
         message =
-            "Pulsa F o el boton para parar."
+            "F o boton para detener.",
     })
 
 
     openValve()
 
 
-    -- ========================================
-    -- BUCLE DE REPOSTAJE
-    -- ========================================
+    -- Bucle principal
 
     while true do
-
-        -- Esperar siguiente lectura
-        -- permitiendo PARAR.
 
         local action =
             waitForSampleOrStop()
@@ -2787,15 +3398,11 @@ local function refuel(
         then
 
             reason =
-                "PARADO POR USUARIO"
+                "PARADO"
 
             break
         end
 
-
-        -- ====================================
-        -- LEER DEPOSITO
-        -- ====================================
 
         local data,
               readError =
@@ -2809,7 +3416,7 @@ local function refuel(
         then
 
             reason =
-                "PARADO POR USUARIO"
+                "PARADO"
 
             break
         end
@@ -2829,15 +3436,14 @@ local function refuel(
 
 
         if data.capacity then
+
             capacity =
                 data.capacity
         end
 
 
-        -- ====================================
-        -- SI EL DEPOSITO SUBE, SE ESTA
-        -- RELLENANDO MIENTRAS MEDIMOS.
-        -- ====================================
+        -- Si sube el deposito,
+        -- alguien lo esta rellenando.
 
         if current >
             previous +
@@ -2851,10 +3457,6 @@ local function refuel(
         end
 
 
-        -- ====================================
-        -- GUARDAR NIVEL MAS BAJO
-        -- ====================================
-
         if current <
             lowest
         then
@@ -2864,10 +3466,6 @@ local function refuel(
         end
 
 
-        -- ====================================
-        -- CALCULAR SERVIDO
-        -- ====================================
-
         local served =
             math.max(
                 0,
@@ -2875,10 +3473,6 @@ local function refuel(
                 lowest
             )
 
-
-        -- ====================================
-        -- PRECIO
-        -- ====================================
 
         local cost =
             math.ceil(
@@ -2895,10 +3489,6 @@ local function refuel(
                 credit
         end
 
-
-        -- ====================================
-        -- INTERFAZ EN TIEMPO REAL
-        -- ====================================
 
         drawMain({
 
@@ -2924,13 +3514,11 @@ local function refuel(
                 true,
 
             message =
-                "F / CLICK = PARAR"
+                "F o boton para detener.",
         })
 
 
-        -- ====================================
-        -- CREDITO AGOTADO
-        -- ====================================
+        -- Credito agotado
 
         if served >=
             maxFuel
@@ -2943,11 +3531,11 @@ local function refuel(
         end
 
 
-        -- ====================================
-        -- DEPOSITO VACIO
-        -- ====================================
+        -- Deposito vacio
 
-        if current <= 0 then
+        if current <=
+            0
+        then
 
             reason =
                 "DEPOSITO VACIO"
@@ -2956,9 +3544,7 @@ local function refuel(
         end
 
 
-        -- ====================================
-        -- DETECTAR SI SIGUE BAJANDO
-        -- ====================================
+        -- Detectar flujo
 
         local difference =
             previous -
@@ -2970,9 +3556,6 @@ local function refuel(
             startedAt
 
 
-        -- Dar tiempo a que empiece
-        -- a moverse el fluido.
-
         if elapsed >=
             cfg.flow_grace_time
         then
@@ -2981,19 +3564,19 @@ local function refuel(
                 cfg.flow_epsilon_mb
             then
 
-                noFlow = 0
+                noFlow =
+                    0
 
             else
 
                 noFlow =
-                    noFlow + 1
+                    noFlow +
+                    1
             end
         end
 
 
-        -- ====================================
-        -- YA NO BAJA EL CONTADOR
-        -- ====================================
+        -- Ya no baja
 
         if noFlow >=
             cfg.no_flow_limit
@@ -3011,9 +3594,7 @@ local function refuel(
     end
 
 
-    -- ========================================
-    -- CERRAR INMEDIATAMENTE
-    -- ========================================
+    -- Cerrar
 
     closeValve()
 
@@ -3025,9 +3606,7 @@ local function refuel(
     )
 
 
-    -- ========================================
-    -- LECTURA FINAL
-    -- ========================================
+    -- Lectura final
 
     local final =
         readTank(
@@ -3035,21 +3614,17 @@ local function refuel(
         )
 
 
-    if final then
-
-        if final.amount <
+    if final and
+        final.amount <
             lowest
-        then
+    then
 
-            lowest =
-                final.amount
-        end
+        lowest =
+            final.amount
     end
 
 
-    -- ========================================
-    -- TOTAL REAL QUE SALIO
-    -- ========================================
+    -- Total servido
 
     local served =
         math.max(
@@ -3059,9 +3634,7 @@ local function refuel(
         )
 
 
-    -- ========================================
-    -- PRECIO FINAL
-    -- ========================================
+    -- Coste
 
     local cost =
         math.ceil(
@@ -3079,9 +3652,7 @@ local function refuel(
     end
 
 
-    -- ========================================
-    -- CAMBIO
-    -- ========================================
+    -- Cambio
 
     local change =
         credit -
@@ -3092,10 +3663,6 @@ local function refuel(
         change
     )
 
-
-    -- ========================================
-    -- RESULTADO FINAL
-    -- ========================================
 
     drawMain({
 
@@ -3122,8 +3689,10 @@ local function refuel(
 
         message =
             "Cambio: " ..
-            tostring(change) ..
-            " FuelToken(s)"
+            tostring(
+                change
+            ) ..
+            " FT",
     })
 
 
@@ -3152,28 +3721,34 @@ local function waitIdleAction()
             os.pullEvent()
 
 
-        -- F
-
         if event ==
             "key"
         then
+
+            -- Iniciar
 
             if a ==
                 keys.f
             then
 
-                return "start"
+                return
+                    "start"
+            end
 
-            elseif a ==
+
+            -- Acceso administrador oculto
+
+            if a ==
                 keys.c
             then
 
-                return "admin"
+                return
+                    "admin"
             end
         end
 
 
-        -- CLICK BOTON
+        -- Click boton
 
         if event ==
             "mouse_click"
@@ -3185,58 +3760,25 @@ local function waitIdleAction()
             )
             then
 
-                return "start"
+                return
+                    "start"
             end
         end
 
 
-        -- Actualizar pantalla
+        -- Refrescar
 
         if event ==
             "timer"
             and
-            a == timer
+            a ==
+                timer
         then
 
-            return "refresh"
+            return
+                "refresh"
         end
     end
-end
-
-
--- ============================================================
--- ITEMS INVALIDOS
--- ============================================================
-
-local function countInvalidItems()
-
-    if not payment then
-        return 0
-    end
-
-
-    local total =
-        0
-
-
-    for _, item in pairs(
-        payment.list()
-    ) do
-
-        if not
-            isFuelToken(
-                item
-            )
-        then
-
-            total =
-                total +
-                item.count
-        end
-    end
-
-
-    return total
 end
 
 
@@ -3266,7 +3808,7 @@ local function main()
     autoRepairTokenID()
 
 
-    -- Seguridad al arrancar
+    -- Siempre cerrar al iniciar
 
     closeValve()
 
@@ -3279,10 +3821,21 @@ local function main()
 
 
         -- ====================================
-        -- ERROR BARRIL PAGO
+        -- FUERA DE SERVICIO
         -- ====================================
 
-        if not payment then
+        if cfg.out_of_service then
+
+            closeValve()
+
+            drawOutOfService()
+
+
+        -- ====================================
+        -- ERROR PAGO
+        -- ====================================
+
+        elseif not payment then
 
             drawMain({
 
@@ -3291,12 +3844,12 @@ local function main()
 
                 message =
                     "No encuentro inventario en " ..
-                    cfg.payment_side
+                    cfg.payment_side,
             })
 
 
         -- ====================================
-        -- ERROR BARRIL ALMACEN
+        -- ERROR ALMACEN
         -- ====================================
 
         elseif not storage then
@@ -3308,15 +3861,15 @@ local function main()
 
                 message =
                     "No encuentro inventario en " ..
-                    cfg.storage_side
+                    cfg.storage_side,
             })
 
 
-        else
+        -- ====================================
+        -- NORMAL
+        -- ====================================
 
-            -- =================================
-            -- CREDITO
-            -- =================================
+        else
 
             local credit =
                 countTokens(
@@ -3328,23 +3881,24 @@ local function main()
                 countInvalidItems()
 
 
-            local message
+            if credit >
+                0
+            then
+
+                local message =
+                    "F o pulsa el boton para comenzar."
 
 
-            if credit > 0 then
-
-                message =
-                    "F o CLICK para comenzar."
-
-                if invalid > 0 then
+                if invalid >
+                    0
+                then
 
                     message =
                         message ..
-                        " Hay " ..
+                        " Item no valido: " ..
                         tostring(
                             invalid
-                        ) ..
-                        " item(s) no validos."
+                        )
                 end
 
 
@@ -3366,15 +3920,19 @@ local function main()
                         false,
 
                     message =
-                        message
+                        message,
                 })
+
 
             else
 
-                message =
+                local message =
                     "Inserta Netherite Coins."
 
-                if invalid > 0 then
+
+                if invalid >
+                    0
+                then
 
                     message =
                         "Objeto no valido en el barril."
@@ -3399,7 +3957,7 @@ local function main()
                         false,
 
                     message =
-                        message
+                        message,
                 })
             end
         end
@@ -3423,53 +3981,65 @@ local function main()
 
             adminMenu()
 
+
             refreshInventories()
 
             autoRepairTokenID()
 
-            tankID = nil
+            tankID =
+                nil
 
 
         -- ====================================
-        -- COMENZAR
+        -- START
         -- ====================================
 
         elseif action ==
             "start"
         then
 
-            refreshInventories()
+            -- Fuera de servicio:
+            -- ignorar F/click.
 
-            autoRepairTokenID()
+            if not
+                cfg.out_of_service
+            then
+
+                refreshInventories()
+
+                autoRepairTokenID()
 
 
-            local credit =
-                countTokens(
-                    payment
-                )
+                local credit =
+                    countTokens(
+                        payment
+                    )
 
 
-            if credit <= 0 then
+                if credit <=
+                    0
+                then
 
-                drawMain({
+                    drawMain({
 
-                    status =
-                        "SIN CREDITO",
+                        status =
+                            "SIN CREDITO",
 
-                    credit =
-                        0,
+                        message =
+                            "Introduce Netherite Coins.",
+                    })
 
-                    message =
-                        "Introduce Netherite Coins primero."
-                })
 
-                sleep(1.2)
+                    sleep(
+                        1.2
+                    )
 
-            else
+                else
 
-                refuel(
-                    credit
-                )
+                    refuel(
+                        credit
+                    )
+                end
             end
         end
     end
@@ -3487,8 +4057,7 @@ local ok,
     )
 
 
--- Intentar cerrar la valvula
--- ante cualquier error.
+-- Intentar cerrar siempre
 
 pcall(
     closeValve
@@ -3499,22 +4068,30 @@ if not ok then
 
     clear()
 
+
     if hasColor() then
+
         term.setTextColor(
             colors.red
         )
     end
 
+
     print(
         "ERROR FATAL DEL SURTIDOR"
     )
 
+
     resetColors()
+
 
     print("")
     print(
-        tostring(err)
+        tostring(
+            err
+        )
     )
+
 
     print("")
     print(
