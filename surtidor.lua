@@ -3,19 +3,27 @@
 -- CC:Tweaked + Lightman's Currency
 --
 -- 1 FuelToken = 1 Netherite Coin
--- ID:
 -- lightmanscurrency:coin_netherite
+--
+-- FUNCIONAMIENTO:
+--
+-- 1. El cliente mete Netherite Coins en el barril derecho.
+-- 2. El ordenador detecta el credito.
+-- 3. NO empieza automaticamente.
+-- 4. El cliente pulsa el boton START.
+-- 5. Se lee el deposito principal de gasolina.
+-- 6. Se abre la valvula.
+-- 7. Se cobra segun los mB que bajen del deposito.
+-- 8. Cuando el nivel deja de bajar, se cierra la valvula.
+-- 9. Se devuelve el cambio al barril derecho.
 --
 -- C = Administrador
 -- PIN = 2050
 -- ============================================================
 
+
 local CONFIG_FILE = "/surtidor.cfg"
 local ADMIN_PIN = "2050"
-
--- ============================================================
--- CONSTANTES
--- ============================================================
 
 local NETHERITE_COIN_ID =
     "lightmanscurrency:coin_netherite"
@@ -34,35 +42,75 @@ local defaults = {
     token_item_id =
         NETHERITE_COIN_ID,
 
-    -- mB que compra 1 FuelToken
+    -- mB comprados por 1 FuelToken
     mb_per_token = 1000,
 
-    -- Barril cliente / cambio
+
+    -- ========================================
+    -- INVENTARIOS
+    -- ========================================
+
+    -- Barril donde se introducen las monedas
+    -- y donde se devuelve el cambio
     payment_side = "right",
 
-    -- Barril caja
+    -- Barril donde se guarda el dinero cobrado
     storage_side = "bottom",
 
-    -- Valvula
+
+    -- ========================================
+    -- BOTON START
+    -- ========================================
+
+    -- Boton fisico de redstone
+    start_button_side = "top",
+
+
+    -- ========================================
+    -- VALVULA
+    -- ========================================
+
+    -- Pulso para ABRIR
     open_side = "back",
+
+    -- Pulso para CERRAR
     close_side = "left",
 
     pulse_time = 0.15,
 
-    -- Lectura del tanque
+
+    -- ========================================
+    -- MEDICION
+    -- ========================================
+
+    -- Cada cuantos segundos leer el deposito
     sample_time = 0.15,
+
+    -- Cuantas lecturas sin bajar deben ocurrir
+    -- antes de considerar que ya no entra gasolina
     no_flow_limit = 10,
 
-    -- Espera antes de comenzar
-    sale_start_delay = 1.0,
+    -- Cuantos mB debe bajar como minimo
+    -- para considerar que existe flujo
+    flow_epsilon_mb = 1,
 
-    -- Cambio
-    change_retry_time = 0.5,
 
-    -- Rednet
+    -- ========================================
+    -- REDNET
+    -- ========================================
+
     protocol = "surtidor_tanque",
+
     tank_host = "tanque_1",
+
     tank_timeout = 2.0,
+
+
+    -- ========================================
+    -- CAMBIO
+    -- ========================================
+
+    change_retry_time = 0.5,
 }
 
 
@@ -82,7 +130,7 @@ local storageName = nil
 
 
 -- ============================================================
--- UTILIDADES
+-- TERMINAL
 -- ============================================================
 
 local function clear()
@@ -95,6 +143,10 @@ local function clear()
     )
 end
 
+
+-- ============================================================
+-- NORMALIZAR ID DE ITEMS
+-- ============================================================
 
 local function normalizeID(value)
 
@@ -114,14 +166,15 @@ local function normalizeID(value)
             ""
         )
 
-    value =
-        string.lower(
-            value
-        )
-
-    return value
+    return string.lower(
+        value
+    )
 end
 
+
+-- ============================================================
+-- COMPROBAR FUELTOKEN
+-- ============================================================
 
 local function isFuelToken(item)
 
@@ -129,28 +182,23 @@ local function isFuelToken(item)
         return false
     end
 
-    local itemID =
+    local id =
         normalizeID(
             item.name
         )
 
-    local configuredID =
+    -- ID configurado
+    if id ==
         normalizeID(
             cfg.token_item_id
         )
-
-    -- ID configurado
-    if itemID ==
-        configuredID
     then
 
         return true
     end
 
-    -- Netherite Coin oficial.
-    -- Esto evita que una configuracion
-    -- antigua rompa el surtidor.
-    if itemID ==
+    -- Siempre aceptar Netherite Coin oficial
+    if id ==
         NETHERITE_COIN_ID
     then
 
@@ -228,9 +276,9 @@ local function loadConfig()
                 "table"
             then
 
-                -- =============================
-                -- MIGRACION VERSION ANTIGUA
-                -- =============================
+                -- ====================================
+                -- MIGRACION DESDE VERSION ANTIGUA
+                -- ====================================
 
                 if data.coin_id then
 
@@ -253,9 +301,9 @@ local function loadConfig()
                 end
 
 
-                -- =============================
-                -- CONFIGURACION ACTUAL
-                -- =============================
+                -- ====================================
+                -- CARGAR CONFIG ACTUAL
+                -- ====================================
 
                 for k, v in pairs(data) do
 
@@ -271,19 +319,15 @@ local function loadConfig()
     end
 
 
-    -- ========================================================
-    -- REPARAR CONFIGURACIONES ANTIGUAS
-    -- ========================================================
+    -- Reparar configuraciones antiguas
 
-    local configured =
+    if normalizeID(
+        cfg.token_item_id
+    ) == ""
+        or
         normalizeID(
             cfg.token_item_id
-        )
-
-
-    if configured == "" or
-        configured ==
-            "cambiar_esto"
+        ) == "cambiar_esto"
     then
 
         cfg.token_item_id =
@@ -291,10 +335,10 @@ local function loadConfig()
     end
 
 
-    if cfg.token_name ==
-        "monedas"
+    if cfg.token_name == ""
         or
-        cfg.token_name == ""
+        cfg.token_name ==
+            "monedas"
     then
 
         cfg.token_name =
@@ -366,7 +410,8 @@ local function refreshInventories()
 
     else
 
-        paymentName = nil
+        paymentName =
+            nil
     end
 
 
@@ -379,11 +424,12 @@ local function refreshInventories()
 
     else
 
-        storageName = nil
+        storageName =
+            nil
     end
 
 
-    -- Comprobar API de inventario
+    -- Deben ser inventarios
 
     if payment and
         (
@@ -417,7 +463,7 @@ end
 
 
 -- ============================================================
--- AUTODETECTAR NETHERITE COIN
+-- REPARAR ID DE LA MONEDA AUTOMATICAMENTE
 -- ============================================================
 
 local function autoRepairTokenID()
@@ -426,19 +472,13 @@ local function autoRepairTokenID()
         return
     end
 
-    local items =
+    for _, item in pairs(
         payment.list()
+    ) do
 
-
-    for _, item in pairs(items) do
-
-        local itemID =
-            normalizeID(
-                item.name
-            )
-
-
-        if itemID ==
+        if normalizeID(
+            item.name
+        ) ==
             NETHERITE_COIN_ID
         then
 
@@ -464,7 +504,7 @@ end
 
 
 -- ============================================================
--- REDSTONE
+-- REDSTONE - VALVULA
 -- ============================================================
 
 local function pulse(side)
@@ -497,6 +537,18 @@ local function closeValve()
 
     pulse(
         cfg.close_side
+    )
+end
+
+
+-- ============================================================
+-- BOTON START
+-- ============================================================
+
+local function startButtonPressed()
+
+    return redstone.getInput(
+        cfg.start_button_side
     )
 end
 
@@ -540,18 +592,20 @@ local function show(
     print("")
 
     print(
-        "1 " ..
-        cfg.token_name ..
-        " = " ..
+        "1 Netherite Coin"
+    )
+
+    print(
+        "= 1 " ..
+        cfg.token_name
+    )
+
+    print(
+        "= " ..
         tostring(
             cfg.mb_per_token
         ) ..
         " mB"
-    )
-
-    print(
-        "1 Netherite Coin = 1 " ..
-        cfg.token_name
     )
 
     print("")
@@ -574,7 +628,7 @@ local function show(
     )
 
     print(
-        "Coste:   " ..
+        "Coste: " ..
         tostring(
             cost or 0
         ) ..
@@ -593,12 +647,23 @@ local function show(
 
 
     print("")
-    print("[C] Administrador")
+
+    print(
+        "[BOTON " ..
+        string.upper(
+            cfg.start_button_side
+        ) ..
+        "] Comenzar"
+    )
+
+    print(
+        "[C] Administrador"
+    )
 end
 
 
 -- ============================================================
--- MENU - FUNCIONES
+-- MENU - UTILIDADES
 -- ============================================================
 
 local validSides = {
@@ -629,7 +694,6 @@ local function askText(
 
 
     if value == "" then
-
         return current
     end
 
@@ -656,20 +720,21 @@ local function askNumber(
 
 
     if text == "" then
-
         return current
     end
 
 
     local value =
-        tonumber(text)
+        tonumber(
+            text
+        )
 
 
     if not value then
 
         print("")
         print(
-            "Numero invalido."
+            "Numero invalido"
         )
 
         sleep(1)
@@ -678,7 +743,8 @@ local function askNumber(
     end
 
 
-    if minimum and
+    if minimum
+        and
         value < minimum
     then
 
@@ -713,14 +779,13 @@ local function askSide(
 
 
     if validSides[value] then
-
         return value
     end
 
 
     print("")
     print(
-        "Lado invalido."
+        "Lado invalido"
     )
 
     print(
@@ -735,10 +800,10 @@ end
 
 
 -- ============================================================
--- DIAGNOSTICO DEL BARRIL
+-- DIAGNOSTICO MONEDAS
 -- ============================================================
 
-local function detectItem()
+local function diagnosticCoins()
 
     refreshInventories()
 
@@ -762,11 +827,11 @@ local function detectItem()
     if not payment then
 
         print(
-            "No encuentro el barril"
+            "No encuentro barril"
         )
 
         print(
-            "en lado: " ..
+            "Lado: " ..
             cfg.payment_side
         )
 
@@ -781,34 +846,31 @@ local function detectItem()
     end
 
 
-    local items =
-        payment.list()
-
-    local found =
-        false
-
-
     print(
-        "ID configurado:"
+        "FuelToken configurado:"
     )
 
     print(
-        normalizeID(
-            cfg.token_item_id
-        )
+        cfg.token_item_id
     )
 
     print("")
 
 
+    local found =
+        false
+
+
     for slot, item in pairs(
-        items
+        payment.list()
     ) do
 
-        found = true
+        found =
+            true
+
 
         print(
-            "SLOT " ..
+            "Slot " ..
             tostring(slot)
         )
 
@@ -816,42 +878,28 @@ local function detectItem()
             tostring(
                 item.count
             ) ..
-            "x"
-        )
-
-        print(
+            "x " ..
             tostring(
                 item.name
             )
         )
 
-        print("")
 
-        print(
-            "Normalizado:"
-        )
-
-        print(
-            normalizeID(
-                item.name
-            )
-        )
-
-        print("")
-
-
-        if isFuelToken(item) then
+        if isFuelToken(
+            item
+        ) then
 
             print(
-                ">>> FUELTOKEN VALIDO <<<"
+                "FUELTOKEN VALIDO"
             )
 
         else
 
             print(
-                ">>> OBJETO NO VALIDO <<<"
+                "OBJETO NO VALIDO"
             )
         end
+
 
         print("")
     end
@@ -860,7 +908,7 @@ local function detectItem()
     if not found then
 
         print(
-            "El barril esta vacio."
+            "Barril vacio"
         )
     end
 
@@ -875,7 +923,7 @@ end
 
 
 -- ============================================================
--- MENU ADMIN
+-- MENU ADMINISTRADOR
 -- ============================================================
 
 local function adminMenu()
@@ -905,7 +953,9 @@ local function adminMenu()
         read("*")
 
 
-    if pin ~= ADMIN_PIN then
+    if pin ~=
+        ADMIN_PIN
+    then
 
         print("")
         print(
@@ -938,29 +988,29 @@ local function adminMenu()
 
 
         print(
-            "1  Nombre: " ..
+            "1 Nombre: " ..
             cfg.station_name
         )
 
 
         print(
-            "2  Nombre token: " ..
+            "2 Nombre token: " ..
             cfg.token_name
         )
 
 
         print(
-            "3  ID FuelToken:"
+            "3 ID token:"
         )
 
         print(
-            "   " ..
+            "  " ..
             cfg.token_item_id
         )
 
 
         print(
-            "4  mB por token: " ..
+            "4 mB por FuelToken: " ..
             cfg.mb_per_token
         )
 
@@ -969,14 +1019,20 @@ local function adminMenu()
 
 
         print(
-            "5  Barril pago: " ..
+            "5 Barril pago: " ..
             cfg.payment_side
         )
 
 
         print(
-            "6  Barril almacen: " ..
+            "6 Barril almacen: " ..
             cfg.storage_side
+        )
+
+
+        print(
+            "7 Boton START: " ..
+            cfg.start_button_side
         )
 
 
@@ -984,19 +1040,19 @@ local function adminMenu()
 
 
         print(
-            "7  Abrir valvula: " ..
+            "8 Abrir valvula: " ..
             cfg.open_side
         )
 
 
         print(
-            "8  Cerrar valvula: " ..
+            "9 Cerrar valvula: " ..
             cfg.close_side
         )
 
 
         print(
-            "9  Tiempo pulso: " ..
+            "10 Tiempo pulso: " ..
             cfg.pulse_time
         )
 
@@ -1005,26 +1061,20 @@ local function adminMenu()
 
 
         print(
-            "10 Intervalo tanque: " ..
+            "11 Intervalo lectura: " ..
             cfg.sample_time
         )
 
 
         print(
-            "11 Limite sin flujo: " ..
+            "12 Lecturas sin flujo: " ..
             cfg.no_flow_limit
         )
 
 
         print(
-            "12 Espera inicio: " ..
-            cfg.sale_start_delay
-        )
-
-
-        print(
-            "13 Reintento cambio: " ..
-            cfg.change_retry_time
+            "13 Minimo cambio mB: " ..
+            cfg.flow_epsilon_mb
         )
 
 
@@ -1044,7 +1094,7 @@ local function adminMenu()
 
 
         print(
-            "16 Timeout tanque: " ..
+            "16 Timeout: " ..
             cfg.tank_timeout
         )
 
@@ -1053,7 +1103,7 @@ local function adminMenu()
 
 
         print(
-            "17 FORZAR Netherite Coin"
+            "17 Restaurar Netherite Coin"
         )
 
 
@@ -1065,7 +1115,7 @@ local function adminMenu()
         print("")
 
         print(
-            "0  GUARDAR Y SALIR"
+            "0 GUARDAR Y SALIR"
         )
 
         print("")
@@ -1101,7 +1151,7 @@ local function adminMenu()
             cfg.token_item_id =
                 normalizeID(
                     askText(
-                        "ID FuelToken",
+                        "ID token",
                         cfg.token_item_id
                     )
                 )
@@ -1137,23 +1187,32 @@ local function adminMenu()
 
         elseif option == "7" then
 
-            cfg.open_side =
+            cfg.start_button_side =
                 askSide(
-                    "Senal ABRIR",
-                    cfg.open_side
+                    "Boton START",
+                    cfg.start_button_side
                 )
 
 
         elseif option == "8" then
 
-            cfg.close_side =
+            cfg.open_side =
                 askSide(
-                    "Senal CERRAR",
-                    cfg.close_side
+                    "Abrir valvula",
+                    cfg.open_side
                 )
 
 
         elseif option == "9" then
+
+            cfg.close_side =
+                askSide(
+                    "Cerrar valvula",
+                    cfg.close_side
+                )
+
+
+        elseif option == "10" then
 
             cfg.pulse_time =
                 askNumber(
@@ -1163,17 +1222,17 @@ local function adminMenu()
                 )
 
 
-        elseif option == "10" then
+        elseif option == "11" then
 
             cfg.sample_time =
                 askNumber(
-                    "Intervalo tanque",
+                    "Intervalo lectura",
                     cfg.sample_time,
                     0.05
                 )
 
 
-        elseif option == "11" then
+        elseif option == "12" then
 
             cfg.no_flow_limit =
                 math.floor(
@@ -1185,23 +1244,13 @@ local function adminMenu()
                 )
 
 
-        elseif option == "12" then
-
-            cfg.sale_start_delay =
-                askNumber(
-                    "Espera inicio",
-                    cfg.sale_start_delay,
-                    0
-                )
-
-
         elseif option == "13" then
 
-            cfg.change_retry_time =
+            cfg.flow_epsilon_mb =
                 askNumber(
-                    "Reintento cambio",
-                    cfg.change_retry_time,
-                    0.1
+                    "Minimo cambio mB",
+                    cfg.flow_epsilon_mb,
+                    0
                 )
 
 
@@ -1231,7 +1280,7 @@ local function adminMenu()
 
             cfg.tank_timeout =
                 askNumber(
-                    "Timeout tanque",
+                    "Timeout",
                     cfg.tank_timeout,
                     0.2
                 )
@@ -1239,29 +1288,25 @@ local function adminMenu()
 
         elseif option == "17" then
 
-            cfg.token_name =
-                "FuelToken"
-
             cfg.token_item_id =
                 NETHERITE_COIN_ID
+
+            cfg.token_name =
+                "FuelToken"
 
             saveConfig()
 
             print("")
             print(
-                "ID reparado:"
+                "Netherite Coin restaurada"
             )
 
-            print(
-                NETHERITE_COIN_ID
-            )
-
-            sleep(2)
+            sleep(1.5)
 
 
         elseif option == "18" then
 
-            detectItem()
+            diagnosticCoins()
 
 
         elseif option == "0" then
@@ -1288,52 +1333,7 @@ end
 
 
 -- ============================================================
--- ESPERA + TECLA C
--- ============================================================
-
-local function waitWithAdmin(
-    seconds
-)
-
-    local timer =
-        os.startTimer(
-            seconds
-        )
-
-
-    while true do
-
-        local event,
-              value =
-            os.pullEvent()
-
-
-        if event ==
-            "timer"
-            and
-            value == timer
-        then
-
-            return false
-        end
-
-
-        if event ==
-            "key"
-            and
-            value == keys.c
-        then
-
-            adminMenu()
-
-            return true
-        end
-    end
-end
-
-
--- ============================================================
--- TANQUE REMOTO
+-- REDNET - BUSCAR LECTOR
 -- ============================================================
 
 local function findTankComputer()
@@ -1349,6 +1349,10 @@ local function findTankComputer()
         nil
 end
 
+
+-- ============================================================
+-- ENVIAR COMANDO AL LECTOR
+-- ============================================================
 
 local function sendTankCommand(
     command,
@@ -1399,9 +1403,14 @@ local function sendTankCommand(
             "rednet_message"
         then
 
-            local sender = a
-            local message = b
-            local protocol = c
+            local sender =
+                a
+
+            local message =
+                b
+
+            local protocol =
+                c
 
 
             if sender ==
@@ -1421,7 +1430,8 @@ local function sendTankCommand(
             a == timer
         then
 
-            tankID = nil
+            tankID =
+                nil
 
             return nil,
                 "TIMEOUT"
@@ -1429,6 +1439,10 @@ local function sendTankCommand(
     end
 end
 
+
+-- ============================================================
+-- LEER DEPOSITO
+-- ============================================================
 
 local function readTank()
 
@@ -1482,7 +1496,7 @@ end
 
 
 -- ============================================================
--- CONTAR FUELTOKENS
+-- CONTAR TOKENS
 -- ============================================================
 
 local function countTokens(
@@ -1490,7 +1504,6 @@ local function countTokens(
 )
 
     if not inventory then
-
         return 0
     end
 
@@ -1635,7 +1648,6 @@ local function moveTokens(
 
 
             if remaining <= 0 then
-
                 break
             end
 
@@ -1658,7 +1670,6 @@ local function moveTokens(
 
 
             if not ok then
-
                 return moved
             end
 
@@ -1678,7 +1689,7 @@ end
 
 
 -- ============================================================
--- RESERVAR PAGO
+-- RESERVAR CREDITO
 -- ============================================================
 
 local function reserveCredit(
@@ -1713,10 +1724,12 @@ local function reserveCredit(
     end
 
 
-    -- Si falla, devolver
-    -- las que hayan pasado.
+    -- Si solo mueve algunas,
+    -- devolverlas.
 
-    if moved > 0 then
+    if moved >
+        0
+    then
 
         moveTokens(
             storage,
@@ -1731,7 +1744,7 @@ end
 
 
 -- ============================================================
--- CAMBIO
+-- DEVOLVER CAMBIO
 -- ============================================================
 
 local function returnChange(
@@ -1766,7 +1779,9 @@ local function finishChange(
         amount
 
 
-    while pending > 0 do
+    while pending >
+        0
+    do
 
         local returned =
             returnChange(
@@ -1779,7 +1794,9 @@ local function finishChange(
             returned
 
 
-        if pending > 0 then
+        if pending >
+            0
+        then
 
             show(
                 "CAMBIO PENDIENTE",
@@ -1791,9 +1808,8 @@ local function finishChange(
                 tostring(
                     pending
                 ) ..
-                " " ..
-                cfg.token_name ..
-                "\nLibera espacio en el barril derecho."
+                " FuelToken(s)\n" ..
+                "Libera espacio en el barril derecho."
             )
 
 
@@ -1813,12 +1829,16 @@ local function refuel(
     credit
 )
 
-    -- Seguridad
+    -- ============================================
+    -- 1. CERRAR POR SEGURIDAD
+    -- ============================================
+
     closeValve()
 
 
-    -- Guardar las monedas
-    -- antes de suministrar.
+    -- ============================================
+    -- 2. RESERVAR LAS MONEDAS
+    -- ============================================
 
     if not
         reserveCredit(
@@ -1832,14 +1852,18 @@ local function refuel(
             0,
             0,
 
-            "Comprueba el barril inferior\ny la red de inventarios."
+            "Comprueba el barril inferior."
         )
 
-        sleep(4)
+        sleep(3)
 
         return
     end
 
+
+    -- ============================================
+    -- 3. LEER DEPOSITO ANTES DE ABRIR
+    -- ============================================
 
     sendTankCommand(
         "begin",
@@ -1848,7 +1872,7 @@ local function refuel(
 
 
     local first,
-          tankError =
+          firstError =
         readTank()
 
 
@@ -1861,18 +1885,22 @@ local function refuel(
             false
         )
 
-        -- No se sirvio nada.
+        -- No se ha servido nada:
+        -- devolver todo.
+
         finishChange(
             credit
         )
 
+
         show(
-            "ERROR TANQUE",
+            "ERROR LECTOR TANQUE",
             0,
             0,
             0,
+
             tostring(
-                tankError
+                firstError
             )
         )
 
@@ -1885,15 +1913,21 @@ local function refuel(
     local initial =
         first.amount
 
+
     local previous =
         initial
 
-    local minimumSeen =
+
+    local lowest =
         initial
+
 
     local noFlow =
         0
 
+
+    -- Maximo que puede comprar
+    -- con sus monedas.
 
     local maxFuel =
         credit *
@@ -1904,16 +1938,30 @@ local function refuel(
         "FINALIZADO"
 
 
+    -- ============================================
+    -- 4. ABRIR VALVULA
+    -- ============================================
+
     show(
-        "ABRIENDO VALVULA",
+        "REPOSTANDO",
         credit,
         0,
-        0
+        0,
+
+        "Deposito inicial: " ..
+        tostring(
+            initial
+        ) ..
+        " mB"
     )
 
 
     openValve()
 
+
+    -- ============================================
+    -- 5. MEDIR CUANTO BAJA EL DEPOSITO
+    -- ============================================
 
     while true do
 
@@ -1922,9 +1970,14 @@ local function refuel(
         )
 
 
-        local data =
+        local data,
+              readError =
             readTank()
 
+
+        -- ========================================
+        -- ERROR DE COMUNICACION
+        -- ========================================
 
         if not data then
 
@@ -1939,36 +1992,54 @@ local function refuel(
             data.amount
 
 
-        -- El tanque no debe
-        -- rellenarse durante venta.
+        -- ========================================
+        -- EL DEPOSITO HA SUBIDO
+        -- ========================================
+        --
+        -- Esto significa que se esta rellenando
+        -- mientras estamos midiendo.
+        --
+        -- No podemos saber correctamente cuanto
+        -- combustible ha salido.
+        -- ========================================
 
         if current >
             previous
         then
 
             reason =
-                "TANQUE RELLENANDOSE"
+                "DEPOSITO RELLENANDOSE"
 
             break
         end
 
 
+        -- Guardar el nivel mas bajo observado
+
         if current <
-            minimumSeen
+            lowest
         then
 
-            minimumSeen =
+            lowest =
                 current
         end
 
+
+        -- ========================================
+        -- CALCULAR mB SERVIDOS
+        -- ========================================
 
         local served =
             math.max(
                 0,
                 initial -
-                minimumSeen
+                lowest
             )
 
+
+        -- ========================================
+        -- CALCULAR PRECIO
+        -- ========================================
 
         local cost =
             math.ceil(
@@ -1986,11 +2057,27 @@ local function refuel(
         end
 
 
+        -- ========================================
+        -- MOSTRAR DATOS EN TIEMPO REAL
+        -- ========================================
+
         show(
             "REPOSTANDO",
             credit,
             served,
             cost,
+
+            "Deposito: " ..
+            tostring(
+                current
+            ) ..
+            " mB\n" ..
+
+            "Bajada: " ..
+            tostring(
+                served
+            ) ..
+            " mB\n" ..
 
             "Credito restante: " ..
             tostring(
@@ -1999,13 +2086,13 @@ local function refuel(
                     credit -
                     cost
                 )
-            ) ..
-            " " ..
-            cfg.token_name
+            )
         )
 
 
-        -- Credito agotado
+        -- ========================================
+        -- CREDITO AGOTADO
+        -- ========================================
 
         if served >=
             maxFuel
@@ -2018,41 +2105,62 @@ local function refuel(
         end
 
 
-        -- Tanque vacio
+        -- ========================================
+        -- DEPOSITO VACIO
+        -- ========================================
 
         if current <=
             0
         then
 
             reason =
-                "TANQUE VACIO"
+                "DEPOSITO VACIO"
 
             break
         end
 
 
-        -- Sin flujo
+        -- ========================================
+        -- DETECTAR SI EL CONTADOR SIGUE BAJANDO
+        -- ========================================
 
-        if current ==
-            previous
+        local difference =
+            previous -
+            current
+
+
+        if difference >=
+            cfg.flow_epsilon_mb
         then
 
-            noFlow =
-                noFlow + 1
-
-        else
+            -- Sigue bajando:
+            -- hay flujo.
 
             noFlow =
                 0
+
+        else
+
+            -- No ha bajado.
+
+            noFlow =
+                noFlow +
+                1
         end
 
+
+        -- ========================================
+        -- SI NO BAJA DURANTE VARIAS LECTURAS,
+        -- EL DEPOSITO DEL VEHICULO ESTA LLENO
+        -- O YA NO ADMITE MAS COMBUSTIBLE.
+        -- ========================================
 
         if noFlow >=
             cfg.no_flow_limit
         then
 
             reason =
-                "DEPOSITO LLENO / SIN FLUJO"
+                "SIN FLUJO / DEPOSITO LLENO"
 
             break
         end
@@ -2063,8 +2171,9 @@ local function refuel(
     end
 
 
-    -- Seguridad:
-    -- cerrar antes de calcular
+    -- ============================================
+    -- 6. CERRAR VALVULA
+    -- ============================================
 
     closeValve()
 
@@ -2075,32 +2184,49 @@ local function refuel(
     )
 
 
+    -- Esperar un poco por si quedaba
+    -- liquido terminando de salir.
+
     sleep(
-        0.2
+        0.25
     )
 
+
+    -- ============================================
+    -- 7. LECTURA FINAL
+    -- ============================================
 
     local final =
         readTank()
 
 
-    if final and
-        final.amount <
-            minimumSeen
-    then
+    if final then
 
-        minimumSeen =
-            final.amount
+        if final.amount <
+            lowest
+        then
+
+            lowest =
+                final.amount
+        end
     end
 
+
+    -- ============================================
+    -- 8. CANTIDAD REAL SERVIDA
+    -- ============================================
 
     local served =
         math.max(
             0,
             initial -
-            minimumSeen
+            lowest
         )
 
+
+    -- ============================================
+    -- 9. PRECIO FINAL
+    -- ============================================
 
     local cost =
         math.ceil(
@@ -2118,6 +2244,10 @@ local function refuel(
     end
 
 
+    -- ============================================
+    -- 10. CAMBIO
+    -- ============================================
+
     local change =
         credit -
         cost
@@ -2128,23 +2258,131 @@ local function refuel(
     )
 
 
+    -- ============================================
+    -- 11. RESULTADO
+    -- ============================================
+
     show(
         reason,
         credit,
         served,
         cost,
 
+        "Deposito inicial: " ..
+        tostring(
+            initial
+        ) ..
+        " mB\n" ..
+
+        "Deposito final: " ..
+        tostring(
+            lowest
+        ) ..
+        " mB\n" ..
+
+        "Total servido: " ..
+        tostring(
+            served
+        ) ..
+        " mB\n" ..
+
         "Cambio: " ..
         tostring(
             change
         ) ..
-        " " ..
-        cfg.token_name ..
-        "\nRetira las monedas del barril derecho."
+        " FuelToken(s)"
     )
 
 
-    sleep(3)
+    sleep(4)
+end
+
+
+-- ============================================================
+-- ESPERAR EVENTOS EN REPOSO
+-- ============================================================
+
+local function waitIdleEvent(
+    lastButtonState
+)
+
+    local timer =
+        os.startTimer(
+            0.5
+        )
+
+
+    while true do
+
+        local event,
+              value =
+            os.pullEvent()
+
+
+        -- ========================================
+        -- ADMIN
+        -- ========================================
+
+        if event ==
+            "key"
+            and
+            value ==
+                keys.c
+        then
+
+            return
+                "admin",
+                startButtonPressed()
+        end
+
+
+        -- ========================================
+        -- CAMBIO DE REDSTONE
+        -- ========================================
+
+        if event ==
+            "redstone"
+        then
+
+            local current =
+                startButtonPressed()
+
+
+            -- Solo reaccionar al flanco:
+            -- OFF -> ON
+
+            if current
+                and
+                not lastButtonState
+            then
+
+                return
+                    "start",
+                    current
+            end
+
+
+            lastButtonState =
+                current
+        end
+
+
+        -- ========================================
+        -- REFRESCAR PANTALLA
+        -- ========================================
+
+        if event ==
+            "timer"
+            and
+            value ==
+                timer
+        then
+
+            return
+                "refresh",
+                startButtonPressed()
+        end
+    end
 end
 
 
@@ -2171,17 +2409,22 @@ local function main()
 
     refreshInventories()
 
-
-    -- Reparar automaticamente
-    -- si ya hay Netherite Coins
-    -- en el barril.
-
     autoRepairTokenID()
 
 
-    -- Seguridad al arrancar
+    -- ============================================
+    -- CERRAR VALVULA AL ARRANCAR
+    -- ============================================
 
     closeValve()
+
+
+    -- Estado inicial del boton.
+    -- Asi no empieza si el boton
+    -- ya estaba pulsado al iniciar.
+
+    local lastButtonState =
+        startButtonPressed()
 
 
     while true do
@@ -2191,9 +2434,9 @@ local function main()
         autoRepairTokenID()
 
 
-        -- ====================================
-        -- BARRIL DE PAGO
-        -- ====================================
+        -- ========================================
+        -- ERROR BARRIL PAGO
+        -- ========================================
 
         if not payment then
 
@@ -2207,14 +2450,10 @@ local function main()
                 cfg.payment_side
             )
 
-            waitWithAdmin(
-                1
-            )
 
-
-        -- ====================================
-        -- BARRIL ALMACEN
-        -- ====================================
+        -- ========================================
+        -- ERROR BARRIL ALMACEN
+        -- ========================================
 
         elseif not storage then
 
@@ -2228,12 +2467,12 @@ local function main()
                 cfg.storage_side
             )
 
-            waitWithAdmin(
-                1
-            )
-
 
         else
+
+            -- ====================================
+            -- CONTAR MONEDAS
+            -- ====================================
 
             local credit =
                 countTokens(
@@ -2246,17 +2485,21 @@ local function main()
                 getInvalidItems()
 
 
+            local extra =
+                ""
+
+
             -- ====================================
-            -- ESPERANDO PAGO
+            -- SIN MONEDAS
             -- ====================================
 
-            if credit <= 0 then
+            if credit <=
+                0
+            then
 
-                local extra =
-
+                extra =
                     "Inserta Netherite Coins.\n" ..
-                    "1 Netherite Coin = 1 " ..
-                    cfg.token_name
+                    "Despues pulsa el boton START."
 
 
                 if invalid >
@@ -2281,119 +2524,137 @@ local function main()
                 )
 
 
-                waitWithAdmin(
-                    0.5
-                )
-
-
             -- ====================================
-            -- CREDITO DETECTADO
+            -- HAY CREDITO
             -- ====================================
 
             else
 
-                local extra =
-
-                    "Netherite Coins: " ..
+                extra =
                     tostring(
                         credit
                     ) ..
-                    "\nCredito disponible: " ..
+                    " Netherite Coin(s)\n" ..
+
+                    "= " ..
                     tostring(
                         credit
                     ) ..
-                    " " ..
-                    cfg.token_name
+                    " FuelToken(s)\n\n" ..
 
+                    "Maximo: " ..
+                    tostring(
+                        credit *
+                        cfg.mb_per_token
+                    ) ..
+                    " mB\n\n" ..
 
-                if invalid >
-                    0
-                then
-
-                    extra =
-                        extra ..
-                        "\n\nOtros objetos:\n" ..
-                        invalidItemText(
-                            invalidNames
-                        )
-                end
+                    "Pulsa el boton START."
 
 
                 show(
-                    "PAGO DETECTADO",
+                    "LISTO PARA REPOSTAR",
                     credit,
                     0,
                     0,
                     extra
                 )
-
-
-                local admin =
-                    waitWithAdmin(
-                        cfg.sale_start_delay
-                    )
-
-
-                if not admin then
-
-                    -- Volver a contar
-                    -- antes de comenzar.
-
-                    refreshInventories()
-
-                    credit =
-                        countTokens(
-                            payment
-                        )
-
-
-                    if credit >
-                        0
-                    then
-
-                        refuel(
-                            credit
-                        )
-
-
-                        -- Esperar retirada
-                        -- del cambio.
-
-                        while
-                            countTokens(
-                                payment
-                            ) >
-                            0
-                        do
-
-                            local remaining =
-                                countTokens(
-                                    payment
-                                )
-
-
-                            show(
-                                "RETIRA EL CAMBIO",
-                                remaining,
-                                0,
-                                0,
-
-                                "Retira " ..
-                                tostring(
-                                    remaining
-                                ) ..
-                                " Netherite Coin(s)\n" ..
-                                "del barril derecho."
-                            )
-
-
-                            sleep(
-                                0.5
-                            )
-                        end
-                    end
-                end
             end
+        end
+
+
+        -- ========================================
+        -- ESPERAR BOTON / C / REFRESCO
+        -- ========================================
+
+        local event
+
+        event,
+        lastButtonState =
+            waitIdleEvent(
+                lastButtonState
+            )
+
+
+        -- ========================================
+        -- ADMIN
+        -- ========================================
+
+        if event ==
+            "admin"
+        then
+
+            adminMenu()
+
+            refreshInventories()
+
+            autoRepairTokenID()
+
+            tankID =
+                nil
+
+            lastButtonState =
+                startButtonPressed()
+
+
+        -- ========================================
+        -- BOTON START
+        -- ========================================
+
+        elseif event ==
+            "start"
+        then
+
+            refreshInventories()
+
+            autoRepairTokenID()
+
+
+            local credit =
+                countTokens(
+                    payment
+                )
+
+
+            -- ====================================
+            -- BOTON SIN MONEDAS
+            -- ====================================
+
+            if credit <=
+                0
+            then
+
+                show(
+                    "SIN CREDITO",
+                    0,
+                    0,
+                    0,
+
+                    "Introduce Netherite Coins\nantes de comenzar."
+                )
+
+                sleep(
+                    1.5
+                )
+
+
+            -- ====================================
+            -- COMENZAR REPOSTAJE
+            -- ====================================
+
+            else
+
+                refuel(
+                    credit
+                )
+            end
+
+
+            -- Debe soltar el boton antes
+            -- de poder iniciar otra venta.
+
+            lastButtonState =
+                startButtonPressed()
         end
     end
 end
@@ -2410,8 +2671,8 @@ local ok,
     )
 
 
--- Si ocurre cualquier error,
--- intentar cerrar la valvula.
+-- Si ocurre un error,
+-- intentar cerrar siempre.
 
 pcall(
     closeValve
@@ -2429,7 +2690,9 @@ if not ok then
     print("")
 
     print(
-        tostring(err)
+        tostring(
+            err
+        )
     )
 
     print("")
