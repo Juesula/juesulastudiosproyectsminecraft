@@ -1,78 +1,165 @@
 -- ============================================================
--- SURTIDOR DE COMBUSTIBLE - CC:Tweaked + Lightman's Currency
--- 1 FuelToken = 1 lightmanscurrency:coin_netherite
+-- SURTIDOR DE COMBUSTIBLE
+-- CC:Tweaked + Lightman's Currency
+--
+-- 1 FuelToken = 1 Netherite Coin
+-- Item esperado:
+-- lightmanscurrency:coin_netherite
+--
+-- C = Administrador
+-- PIN = 2050
 -- ============================================================
 
 local CONFIG_FILE = "/surtidor.cfg"
 local ADMIN_PIN = "2050"
 
+-- ============================================================
+-- CONFIGURACION POR DEFECTO
+-- ============================================================
+
 local defaults = {
+
     station_name = "SURTIDOR",
+
     token_name = "FuelToken",
-    token_item_id = "lightmanscurrency:coin_netherite",
+
+    token_item_id =
+        "lightmanscurrency:coin_netherite",
+
+    -- Combustible comprado por cada FuelToken
     mb_per_token = 1000,
 
-    payment_side = "right",   -- Barril pago/cambio
-    storage_side = "bottom",  -- Barril caja/almacen
+    -- Barril donde el cliente mete monedas
+    -- y donde recibe el cambio
+    payment_side = "right",
 
-    open_side = "back",       -- Pulso ABRIR valvula
-    close_side = "left",      -- Pulso CERRAR valvula
+    -- Barril donde se guardan
+    -- las monedas cobradas
+    storage_side = "bottom",
+
+    -- Señales para la valvula
+    open_side = "back",
+    close_side = "left",
+
+    -- Duracion del pulso de redstone
     pulse_time = 0.15,
 
+    -- Cada cuanto consultar el tanque
     sample_time = 0.15,
+
+    -- Numero de lecturas sin bajar
+    -- antes de considerar que no hay flujo
     no_flow_limit = 10,
+
+    -- Tiempo desde detectar monedas
+    -- hasta comenzar el repostaje
     sale_start_delay = 1.0,
+
+    -- Reintento si no cabe el cambio
     change_retry_time = 0.5,
 
+    -- Comunicacion con PC del tanque
     protocol = "surtidor_tanque",
     tank_host = "tanque_1",
     tank_timeout = 2.0,
 }
 
+
+-- ============================================================
+-- VARIABLES
+-- ============================================================
+
 local cfg = {}
+
 local tankID = nil
-local payment, storage
-local paymentName, storageName
+
+local payment = nil
+local storage = nil
+
+local paymentName = nil
+local storageName = nil
+
+
+-- ============================================================
+-- CONFIGURACION
+-- ============================================================
 
 local function copyDefaults()
+
     cfg = {}
-    for k, v in pairs(defaults) do cfg[k] = v end
+
+    for k, v in pairs(defaults) do
+        cfg[k] = v
+    end
 end
+
 
 local function saveConfig()
-    local f = fs.open(CONFIG_FILE, "w")
-    if not f then error("No se pudo guardar " .. CONFIG_FILE) end
 
-    f.write(textutils.serialize(cfg))
-    f.close()
+    local file =
+        fs.open(
+            CONFIG_FILE,
+            "w"
+        )
+
+    if not file then
+        error(
+            "No se pudo guardar " ..
+            CONFIG_FILE
+        )
+    end
+
+    file.write(
+        textutils.serialize(cfg)
+    )
+
+    file.close()
 end
 
+
 local function loadConfig()
+
     copyDefaults()
 
     if fs.exists(CONFIG_FILE) then
-        local f = fs.open(CONFIG_FILE, "r")
 
-        if f then
-            local data = textutils.unserialize(f.readAll())
-            f.close()
+        local file =
+            fs.open(
+                CONFIG_FILE,
+                "r"
+            )
+
+        if file then
+
+            local data =
+                textutils.unserialize(
+                    file.readAll()
+                )
+
+            file.close()
 
             if type(data) == "table" then
 
-                -- Migracion desde versiones anteriores
+                -- Migracion desde
+                -- versiones anteriores
+
                 if data.coin_id then
-                    cfg.token_item_id = data.coin_id
+                    cfg.token_item_id =
+                        data.coin_id
                 end
 
                 if data.currency_name then
-                    cfg.token_name = data.currency_name
+                    cfg.token_name =
+                        data.currency_name
                 end
 
                 if data.mb_per_coin then
-                    cfg.mb_per_token = data.mb_per_coin
+                    cfg.mb_per_token =
+                        data.mb_per_coin
                 end
 
                 for k, v in pairs(data) do
+
                     if defaults[k] ~= nil then
                         cfg[k] = v
                     end
@@ -81,90 +168,181 @@ local function loadConfig()
         end
     end
 
-    if cfg.token_item_id == "CAMBIAR_ESTO" then
+    -- Corregir configuracion antigua
+
+    if cfg.token_item_id ==
+        "CAMBIAR_ESTO"
+    then
+
         cfg.token_item_id =
             "lightmanscurrency:coin_netherite"
     end
 
-    if cfg.token_name == "monedas" then
-        cfg.token_name = "FuelToken"
+    if cfg.token_name ==
+        "monedas"
+    then
+
+        cfg.token_name =
+            "FuelToken"
     end
 
     saveConfig()
 end
 
+
+-- ============================================================
+-- TERMINAL
+-- ============================================================
+
 local function clear()
+
     term.clear()
-    term.setCursorPos(1, 1)
+
+    term.setCursorPos(
+        1,
+        1
+    )
 end
+
+
+-- ============================================================
+-- MODEMS
+-- ============================================================
 
 local function openModems()
 
-    for _, name in ipairs(peripheral.getNames()) do
+    for _, name in ipairs(
+        peripheral.getNames()
+    ) do
 
         local types = {
             peripheral.getType(name)
         }
 
-        for _, t in ipairs(types) do
+        for _, peripheralType
+            in ipairs(types)
+        do
 
-            if t == "modem" then
-                pcall(rednet.open, name)
+            if peripheralType ==
+                "modem"
+            then
+
+                pcall(
+                    rednet.open,
+                    name
+                )
             end
-
         end
     end
 end
 
+
+-- ============================================================
+-- INVENTARIOS
+-- ============================================================
+
 local function refreshInventories()
 
     payment =
-        peripheral.wrap(cfg.payment_side)
+        peripheral.wrap(
+            cfg.payment_side
+        )
 
     storage =
-        peripheral.wrap(cfg.storage_side)
+        peripheral.wrap(
+            cfg.storage_side
+        )
 
-    paymentName =
-        payment and
-        peripheral.getName(payment)
-        or nil
+    if payment then
+        paymentName =
+            peripheral.getName(
+                payment
+            )
+    else
+        paymentName = nil
+    end
 
-    storageName =
-        storage and
-        peripheral.getName(storage)
-        or nil
+    if storage then
+        storageName =
+            peripheral.getName(
+                storage
+            )
+    else
+        storageName = nil
+    end
+
+    -- Comprobar que realmente sean
+    -- inventarios compatibles
 
     if payment and
-        (not payment.list or
-         not payment.pushItems)
+        (
+            type(payment.list) ~=
+                "function"
+            or
+            type(payment.pushItems) ~=
+                "function"
+        )
     then
+
         payment = nil
+        paymentName = nil
     end
 
     if storage and
-        (not storage.list or
-         not storage.pushItems)
+        (
+            type(storage.list) ~=
+                "function"
+            or
+            type(storage.pushItems) ~=
+                "function"
+        )
     then
+
         storage = nil
+        storageName = nil
     end
 end
 
+
+-- ============================================================
+-- REDSTONE
+-- ============================================================
+
 local function pulse(side)
 
-    redstone.setOutput(side, true)
+    redstone.setOutput(
+        side,
+        true
+    )
 
-    sleep(cfg.pulse_time)
+    sleep(
+        cfg.pulse_time
+    )
 
-    redstone.setOutput(side, false)
+    redstone.setOutput(
+        side,
+        false
+    )
 end
+
 
 local function openValve()
-    pulse(cfg.open_side)
+    pulse(
+        cfg.open_side
+    )
 end
 
+
 local function closeValve()
-    pulse(cfg.close_side)
+    pulse(
+        cfg.close_side
+    )
 end
+
+
+-- ============================================================
+-- PANTALLA PRINCIPAL
+-- ============================================================
 
 local function show(
     status,
@@ -189,14 +367,16 @@ local function show(
     print("")
 
     print(
+        "Precio:"
+    )
+
+    print(
         "1 " ..
         cfg.token_name ..
         " = " ..
-        cfg.mb_per_token ..
+        tostring(cfg.mb_per_token) ..
         " mB"
     )
-
-    print("Item: Netherite Coin")
 
     print("")
 
@@ -220,7 +400,10 @@ local function show(
         cfg.token_name
     )
 
-    if extra and extra ~= "" then
+    if extra and
+        extra ~= ""
+    then
+
         print("")
         print(extra)
     end
@@ -229,7 +412,13 @@ local function show(
     print("[C] Administrador")
 end
 
+
+-- ============================================================
+-- FUNCIONES DEL MENU
+-- ============================================================
+
 local validSides = {
+
     left = true,
     right = true,
     top = true,
@@ -237,6 +426,7 @@ local validSides = {
     front = true,
     back = true,
 }
+
 
 local function askText(
     label,
@@ -250,7 +440,8 @@ local function askText(
         "]: "
     )
 
-    local value = read()
+    local value =
+        read()
 
     if value == "" then
         return current
@@ -258,6 +449,7 @@ local function askText(
 
     return value
 end
+
 
 local function askNumber(
     label,
@@ -272,7 +464,8 @@ local function askNumber(
         "]: "
     )
 
-    local text = read()
+    local text =
+        read()
 
     if text == "" then
         return current
@@ -281,12 +474,24 @@ local function askNumber(
     local value =
         tonumber(text)
 
-    if not value or
-        (minimum and
-         value < minimum)
+    if not value then
+
+        print("Numero invalido.")
+
+        sleep(1)
+
+        return current
+    end
+
+    if minimum and
+        value < minimum
     then
 
-        print("Valor invalido.")
+        print(
+            "El minimo es " ..
+            tostring(minimum)
+        )
+
         sleep(1)
 
         return current
@@ -294,6 +499,7 @@ local function askNumber(
 
     return value
 end
+
 
 local function askSide(
     label,
@@ -312,30 +518,229 @@ local function askSide(
         return value
     end
 
+    print("")
+    print("Lado invalido.")
     print(
-        "Usa left/right/top/bottom/front/back"
+        "left/right/top/bottom/front/back"
     )
 
-    sleep(1.5)
+    sleep(2)
 
     return current
 end
+
+
+-- ============================================================
+-- DETECTAR ITEM DEL BARRIL
+-- ============================================================
+
+local function detectItem()
+
+    refreshInventories()
+
+    clear()
+
+    print("================================")
+    print(" DETECTOR DE ITEM")
+    print("================================")
+    print("")
+
+    if not payment then
+
+        print(
+            "No encuentro el barril"
+        )
+
+        print(
+            "en: " ..
+            cfg.payment_side
+        )
+
+        print("")
+        print(
+            "Pulsa ENTER..."
+        )
+
+        read()
+
+        return
+    end
+
+    local items =
+        payment.list()
+
+    local found = false
+
+    for slot, item in pairs(items) do
+
+        found = true
+
+        print(
+            "Slot: " ..
+            tostring(slot)
+        )
+
+        print(
+            "Cantidad: " ..
+            tostring(item.count)
+        )
+
+        print("")
+
+        print("ID DETECTADO:")
+
+        print(
+            tostring(item.name)
+        )
+
+        print("")
+
+        print(
+            "ID configurado:"
+        )
+
+        print(
+            cfg.token_item_id
+        )
+
+        print("")
+
+        if item.name ==
+            cfg.token_item_id
+        then
+
+            print(
+                "RESULTADO: VALIDO"
+            )
+
+        else
+
+            print(
+                "RESULTADO: NO COINCIDE"
+            )
+        end
+
+        print("")
+    end
+
+    if not found then
+
+        print(
+            "El barril esta vacio."
+        )
+    end
+
+    print("")
+    print(
+        "Pulsa ENTER..."
+    )
+
+    read()
+end
+
+
+-- ============================================================
+-- USAR ITEM DETECTADO COMO FUELTOKEN
+-- ============================================================
+
+local function setDetectedItem()
+
+    refreshInventories()
+
+    clear()
+
+    print("================================")
+    print(" CONFIGURAR FUELTOKEN")
+    print("================================")
+    print("")
+
+    if not payment then
+
+        print(
+            "No encuentro el barril"
+        )
+
+        sleep(2)
+
+        return
+    end
+
+    local items =
+        payment.list()
+
+    for _, item in pairs(items) do
+
+        print(
+            "Detectado:"
+        )
+
+        print(
+            item.name
+        )
+
+        print("")
+
+        write(
+            "Usar como FuelToken? S/N: "
+        )
+
+        local answer =
+            string.lower(
+                read()
+            )
+
+        if answer == "s" or
+            answer == "si"
+        then
+
+            cfg.token_item_id =
+                item.name
+
+            saveConfig()
+
+            print("")
+            print(
+                "FuelToken actualizado."
+            )
+
+            sleep(2)
+        end
+
+        return
+    end
+
+    print(
+        "El barril esta vacio."
+    )
+
+    sleep(2)
+end
+
+
+-- ============================================================
+-- MENU ADMINISTRADOR
+-- ============================================================
 
 local function adminMenu()
 
     clear()
 
-    print("ADMINISTRADOR")
+    print("================================")
+    print(" ADMINISTRADOR")
+    print("================================")
     print("")
 
     write("Codigo: ")
 
-    local pin = read("*")
+    local pin =
+        read("*")
 
     if pin ~= ADMIN_PIN then
 
         print("")
-        print("CODIGO INCORRECTO")
+        print(
+            "CODIGO INCORRECTO"
+        )
 
         sleep(2)
 
@@ -349,6 +754,7 @@ local function adminMenu()
         print("================================")
         print(" CONFIGURACION SURTIDOR")
         print("================================")
+        print("")
 
         print(
             "1  Nombre: " ..
@@ -361,15 +767,20 @@ local function adminMenu()
         )
 
         print(
-            "3  Item token: " ..
+            "3  ID FuelToken:"
+        )
+
+        print(
+            "   " ..
             cfg.token_item_id
         )
 
         print(
-            "4  mB por token: " ..
+            "4  mB por FuelToken: " ..
             cfg.mb_per_token
         )
 
+        print("")
         print(
             "5  Barril pago: " ..
             cfg.payment_side
@@ -380,13 +791,14 @@ local function adminMenu()
             cfg.storage_side
         )
 
+        print("")
         print(
-            "7  Senal ABRIR: " ..
+            "7  Abrir valvula: " ..
             cfg.open_side
         )
 
         print(
-            "8  Senal CERRAR: " ..
+            "8  Cerrar valvula: " ..
             cfg.close_side
         )
 
@@ -395,13 +807,14 @@ local function adminMenu()
             cfg.pulse_time
         )
 
+        print("")
         print(
-            "10 Intervalo lectura: " ..
+            "10 Intervalo tanque: " ..
             cfg.sample_time
         )
 
         print(
-            "11 Lecturas sin flujo: " ..
+            "11 Limite sin flujo: " ..
             cfg.no_flow_limit
         )
 
@@ -415,6 +828,7 @@ local function adminMenu()
             cfg.change_retry_time
         )
 
+        print("")
         print(
             "14 Protocolo: " ..
             cfg.protocol
@@ -430,17 +844,31 @@ local function adminMenu()
             cfg.tank_timeout
         )
 
+        print("")
         print(
             "17 Restaurar Netherite Coin"
         )
 
+        print(
+            "18 Ver item del barril"
+        )
+
+        print(
+            "19 Usar item del barril"
+        )
+
         print("")
-        print("0  GUARDAR Y SALIR")
+        print(
+            "0  GUARDAR Y SALIR"
+        )
+
         print("")
 
         write("> ")
 
-        local option = read()
+        local option =
+            read()
+
 
         if option == "1" then
 
@@ -450,6 +878,7 @@ local function adminMenu()
                     cfg.station_name
                 )
 
+
         elseif option == "2" then
 
             cfg.token_name =
@@ -458,22 +887,25 @@ local function adminMenu()
                     cfg.token_name
                 )
 
+
         elseif option == "3" then
 
             cfg.token_item_id =
                 askText(
-                    "ID item token",
+                    "ID FuelToken",
                     cfg.token_item_id
                 )
+
 
         elseif option == "4" then
 
             cfg.mb_per_token =
                 askNumber(
-                    "mB por token",
+                    "mB por FuelToken",
                     cfg.mb_per_token,
                     1
                 )
+
 
         elseif option == "5" then
 
@@ -483,6 +915,7 @@ local function adminMenu()
                     cfg.payment_side
                 )
 
+
         elseif option == "6" then
 
             cfg.storage_side =
@@ -490,6 +923,7 @@ local function adminMenu()
                     "Barril almacen",
                     cfg.storage_side
                 )
+
 
         elseif option == "7" then
 
@@ -499,6 +933,7 @@ local function adminMenu()
                     cfg.open_side
                 )
 
+
         elseif option == "8" then
 
             cfg.close_side =
@@ -506,6 +941,7 @@ local function adminMenu()
                     "Senal CERRAR",
                     cfg.close_side
                 )
+
 
         elseif option == "9" then
 
@@ -516,14 +952,16 @@ local function adminMenu()
                     0.05
                 )
 
+
         elseif option == "10" then
 
             cfg.sample_time =
                 askNumber(
-                    "Intervalo lectura",
+                    "Intervalo tanque",
                     cfg.sample_time,
                     0.05
                 )
+
 
         elseif option == "11" then
 
@@ -536,6 +974,7 @@ local function adminMenu()
                     )
                 )
 
+
         elseif option == "12" then
 
             cfg.sale_start_delay =
@@ -545,6 +984,7 @@ local function adminMenu()
                     0
                 )
 
+
         elseif option == "13" then
 
             cfg.change_retry_time =
@@ -553,6 +993,7 @@ local function adminMenu()
                     cfg.change_retry_time,
                     0.1
                 )
+
 
         elseif option == "14" then
 
@@ -564,6 +1005,7 @@ local function adminMenu()
 
             tankID = nil
 
+
         elseif option == "15" then
 
             cfg.tank_host =
@@ -574,6 +1016,7 @@ local function adminMenu()
 
             tankID = nil
 
+
         elseif option == "16" then
 
             cfg.tank_timeout =
@@ -583,6 +1026,7 @@ local function adminMenu()
                     0.2
                 )
 
+
         elseif option == "17" then
 
             cfg.token_name =
@@ -591,12 +1035,29 @@ local function adminMenu()
             cfg.token_item_id =
                 "lightmanscurrency:coin_netherite"
 
+            saveConfig()
+
             print("")
             print(
-                "1 FuelToken = 1 Netherite Coin"
+                "Restaurado:"
             )
 
-            sleep(1.5)
+            print(
+                "lightmanscurrency:coin_netherite"
+            )
+
+            sleep(2)
+
+
+        elseif option == "18" then
+
+            detectItem()
+
+
+        elseif option == "19" then
+
+            setDetectedItem()
+
 
         elseif option == "0" then
 
@@ -606,6 +1067,7 @@ local function adminMenu()
 
             tankID = nil
 
+            print("")
             print(
                 "Configuracion guardada."
             )
@@ -617,19 +1079,28 @@ local function adminMenu()
     end
 end
 
+
+-- ============================================================
+-- ESPERA CON TECLA C
+-- ============================================================
+
 local function waitWithAdmin(seconds)
 
     local timer =
-        os.startTimer(seconds)
+        os.startTimer(
+            seconds
+        )
 
     while true do
 
-        local event, value =
+        local event,
+              value =
             os.pullEvent()
 
         if event == "timer"
             and value == timer
         then
+
             return false
         end
 
@@ -644,27 +1115,34 @@ local function waitWithAdmin(seconds)
     end
 end
 
+
+-- ============================================================
+-- REDNET / TANQUE
+-- ============================================================
+
 local function findTankComputer()
 
     tankID =
         rednet.lookup(
             cfg.protocol,
-            cfg.tank_host,
-            cfg.tank_timeout
+            cfg.tank_host
         )
 
     return tankID ~= nil
 end
+
 
 local function sendTankCommand(
     command,
     waitReply
 )
 
-    if not tankID and
-        not findTankComputer()
-    then
-        return nil, "NO_TANK_PC"
+    if not tankID then
+
+        if not findTankComputer() then
+            return nil,
+                "NO_TANK_PC"
+        end
     end
 
     rednet.send(
@@ -685,36 +1163,44 @@ local function sendTankCommand(
     while true do
 
         local event,
-              sender,
-              message,
-              protocol =
+              a,
+              b,
+              c =
             os.pullEvent()
 
         if event ==
             "rednet_message"
         then
 
+            local sender = a
+            local message = b
+            local protocol = c
+
             if sender == tankID
                 and protocol ==
                     cfg.protocol
             then
+
                 return message
             end
 
         elseif event == "timer"
-            and sender == timer
+            and a == timer
         then
 
             tankID = nil
 
-            return nil, "TIMEOUT"
+            return nil,
+                "TIMEOUT"
         end
     end
 end
 
+
 local function readTank()
 
-    local message, err =
+    local message,
+          err =
         sendTankCommand(
             "read",
             true
@@ -724,24 +1210,36 @@ local function readTank()
         return nil, err
     end
 
-    if type(message) ~= "table" then
-        return nil, "BAD_REPLY"
+    if type(message) ~=
+        "table"
+    then
+
+        return nil,
+            "BAD_REPLY"
     end
 
     if message.ok == false then
+
         return nil,
-            message.error or
-            "TANK_ERROR"
+            message.error
+            or "TANK_ERROR"
     end
 
-    if type(message.amount)
-        ~= "number"
+    if type(message.amount) ~=
+        "number"
     then
-        return nil, "BAD_AMOUNT"
+
+        return nil,
+            "BAD_AMOUNT"
     end
 
     return message
 end
+
+
+-- ============================================================
+-- CONTAR FUELTOKENS
+-- ============================================================
 
 local function countTokens(inv)
 
@@ -768,13 +1266,19 @@ local function countTokens(inv)
     return total
 end
 
-local function countInvalidItems()
+
+-- ============================================================
+-- OBJETOS NO VALIDOS
+-- ============================================================
+
+local function getInvalidItems()
 
     if not payment then
-        return 0
+        return 0, {}
     end
 
     local total = 0
+    local names = {}
 
     for _, item in pairs(
         payment.list()
@@ -787,11 +1291,47 @@ local function countInvalidItems()
             total =
                 total +
                 item.count
+
+            names[item.name] =
+                (
+                    names[item.name]
+                    or 0
+                )
+                +
+                item.count
         end
     end
 
-    return total
+    return total,
+        names
 end
+
+
+local function invalidItemText(
+    invalidNames
+)
+
+    local text = ""
+
+    for name, count in pairs(
+        invalidNames
+    ) do
+
+        text =
+            text ..
+            tostring(count) ..
+            "x " ..
+            tostring(name) ..
+            "\n"
+    end
+
+    return text
+end
+
+
+-- ============================================================
+-- MOVER FUELTOKENS
+-- ============================================================
 
 local function moveTokens(
     source,
@@ -799,7 +1339,11 @@ local function moveTokens(
     amount
 )
 
-    if amount <= 0 then
+    if not source or
+        not destinationName or
+        amount <= 0
+    then
+
         return 0
     end
 
@@ -813,47 +1357,59 @@ local function moveTokens(
             cfg.token_item_id
         then
 
+            local remaining =
+                amount - moved
+
+            if remaining <= 0 then
+                break
+            end
+
             local wanted =
                 math.min(
                     item.count,
-                    amount - moved
+                    remaining
                 )
 
-            if wanted > 0 then
+            local ok,
+                  quantity =
+                pcall(
+                    source.pushItems,
+                    destinationName,
+                    slot,
+                    wanted
+                )
 
-                local ok, quantity =
-                    pcall(
-                        source.pushItems,
-                        destinationName,
-                        slot,
-                        wanted
-                    )
-
-                if not ok then
-                    return moved
-                end
-
-                moved =
-                    moved +
-                    (quantity or 0)
-
-                if moved >= amount then
-                    break
-                end
+            if not ok then
+                return moved
             end
+
+            moved =
+                moved +
+                (
+                    quantity
+                    or 0
+                )
         end
     end
 
     return moved
 end
 
-local function reserveCredit(amount)
+
+-- ============================================================
+-- RESERVAR CREDITO
+-- ============================================================
+
+local function reserveCredit(
+    amount
+)
 
     refreshInventories()
 
-    if not payment
-        or not storage
+    if not payment or
+        not storage
     then
+
         return false, 0
     end
 
@@ -865,11 +1421,14 @@ local function reserveCredit(amount)
         )
 
     if moved == amount then
-        return true, moved
+
+        return true,
+            moved
     end
 
-    -- Si no caben todas,
-    -- devolver las que se movieron
+    -- Si no pudieron pasar todas,
+    -- devolvemos lo movido.
+
     if moved > 0 then
 
         moveTokens(
@@ -879,16 +1438,25 @@ local function reserveCredit(amount)
         )
     end
 
-    return false, moved
+    return false,
+        moved
 end
 
-local function returnChange(amount)
+
+-- ============================================================
+-- DEVOLVER CAMBIO
+-- ============================================================
+
+local function returnChange(
+    amount
+)
 
     refreshInventories()
 
-    if not payment
-        or not storage
+    if not payment or
+        not storage
     then
+
         return 0
     end
 
@@ -899,14 +1467,20 @@ local function returnChange(amount)
     )
 end
 
-local function finishChange(change)
 
-    local pending = change
+local function finishChange(
+    change
+)
+
+    local pending =
+        change
 
     while pending > 0 do
 
         local returned =
-            returnChange(pending)
+            returnChange(
+                pending
+            )
 
         pending =
             pending -
@@ -919,14 +1493,15 @@ local function finishChange(change)
                 0,
                 0,
                 0,
+
                 "Faltan " ..
-                pending ..
+                tostring(pending) ..
                 " " ..
                 cfg.token_name ..
                 "\nLibera espacio en el barril derecho."
             )
 
-            waitWithAdmin(
+            sleep(
                 cfg.change_retry_time
             )
 
@@ -935,39 +1510,54 @@ local function finishChange(change)
     end
 end
 
-local function refuel(credit)
+
+-- ============================================================
+-- REPOSTAJE
+-- ============================================================
+
+local function refuel(
+    credit
+)
 
     -- Seguridad
     closeValve()
 
-    -- Guardamos primero todas
-    -- las monedas introducidas
+    -- Pasar monedas primero
+    -- al barril inferior
+
     local reserved =
-        reserveCredit(credit)
+        reserveCredit(
+            credit
+        )
 
     if not reserved then
 
         show(
-            "CAJA LLENA",
+            "NO PUEDO GUARDAR PAGO",
             credit,
             0,
             0,
-            "No puedo guardar los FuelTokens.\nVacia el barril inferior."
+
+            "Comprueba el barril inferior\ny la conexion de perifericos."
         )
 
-        sleep(3)
+        sleep(4)
 
         return
     end
 
-    -- Bloquear configuracion
-    -- del lector durante la venta
+
+    -- Avisar al lector
     sendTankCommand(
         "begin",
         false
     )
 
-    local first, err =
+
+    -- Primera lectura
+
+    local first,
+          readError =
         readTank()
 
     if not first then
@@ -979,22 +1569,23 @@ local function refuel(credit)
             false
         )
 
-        -- No se ha servido combustible.
-        -- Devolver todo el credito.
-        finishChange(credit)
+        finishChange(
+            credit
+        )
 
         show(
             "ERROR TANQUE",
             0,
             0,
             0,
-            tostring(err)
+            tostring(readError)
         )
 
         sleep(3)
 
         return
     end
+
 
     local initial =
         first.amount
@@ -1014,8 +1605,9 @@ local function refuel(credit)
     local reason =
         "FINALIZADO"
 
+
     show(
-        "ABRIENDO",
+        "ABRIENDO VALVULA",
         credit,
         0,
         0
@@ -1023,14 +1615,18 @@ local function refuel(credit)
 
     openValve()
 
+
     while true do
 
         sleep(
             cfg.sample_time
         )
 
-        local data, readErr =
+
+        local data,
+              err =
             readTank()
+
 
         if not data then
 
@@ -1040,12 +1636,15 @@ local function refuel(credit)
             break
         end
 
+
         local current =
             data.amount
 
-        -- Si aumenta durante la venta,
-        -- el tanque esta siendo rellenado
-        -- y ya no podemos medir bien.
+
+        -- Si el tanque aumenta,
+        -- alguien lo esta rellenando
+        -- durante la venta.
+
         if current > previous then
 
             reason =
@@ -1053,6 +1652,7 @@ local function refuel(credit)
 
             break
         end
+
 
         if current <
             minimumSeen
@@ -1062,6 +1662,7 @@ local function refuel(credit)
                 current
         end
 
+
         local served =
             math.max(
                 0,
@@ -1069,15 +1670,18 @@ local function refuel(credit)
                 minimumSeen
             )
 
+
         local cost =
             math.ceil(
                 served /
                 cfg.mb_per_token
             )
 
+
         if cost > credit then
             cost = credit
         end
+
 
         show(
             "REPOSTANDO",
@@ -1085,17 +1689,23 @@ local function refuel(credit)
             served,
             cost,
 
-            "Restante: " ..
-            math.max(
-                0,
-                credit - cost
+            "Credito restante: " ..
+            tostring(
+                math.max(
+                    0,
+                    credit - cost
+                )
             ) ..
             " " ..
             cfg.token_name
         )
 
-        -- Todo el credito gastado
-        if served >= maxFuel then
+
+        -- Credito agotado
+
+        if served >=
+            maxFuel
+        then
 
             reason =
                 "CREDITO AGOTADO"
@@ -1103,7 +1713,9 @@ local function refuel(credit)
             break
         end
 
-        -- Tanque de la estacion vacio
+
+        -- Tanque vacio
+
         if current <= 0 then
 
             reason =
@@ -1112,9 +1724,12 @@ local function refuel(credit)
             break
         end
 
-        -- Detectar deposito del
-        -- cliente lleno/sin flujo
-        if current == previous then
+
+        -- Detectar ausencia de flujo
+
+        if current ==
+            previous
+        then
 
             noFlow =
                 noFlow + 1
@@ -1123,6 +1738,7 @@ local function refuel(credit)
 
             noFlow = 0
         end
+
 
         if noFlow >=
             cfg.no_flow_limit
@@ -1134,30 +1750,39 @@ local function refuel(credit)
             break
         end
 
+
         previous =
             current
     end
 
-    -- CERRAR SIEMPRE
+
+    -- Cerrar siempre
     closeValve()
+
 
     sendTankCommand(
         "end",
         false
     )
 
-    -- Lectura final
+
+    -- Ultima lectura
+
+    sleep(0.2)
+
     local final =
         readTank()
 
+
     if final and
         final.amount <
-        minimumSeen
+            minimumSeen
     then
 
         minimumSeen =
             final.amount
     end
+
 
     local served =
         math.max(
@@ -1166,26 +1791,30 @@ local function refuel(credit)
             minimumSeen
         )
 
-    -- Como los FuelToken
-    -- son indivisibles,
-    -- se redondea hacia arriba.
+
     local cost =
         math.ceil(
             served /
             cfg.mb_per_token
         )
 
+
     if cost > credit then
         cost = credit
     end
+
 
     local change =
         credit -
         cost
 
+
     -- Devolver monedas sobrantes
-    -- del barril inferior al derecho
-    finishChange(change)
+
+    finishChange(
+        change
+    )
+
 
     show(
         reason,
@@ -1194,14 +1823,20 @@ local function refuel(credit)
         cost,
 
         "Cambio: " ..
-        change ..
+        tostring(change) ..
         " " ..
         cfg.token_name ..
         "\nRetira el cambio del barril derecho."
     )
 
+
     sleep(3)
 end
+
+
+-- ============================================================
+-- PROGRAMA PRINCIPAL
+-- ============================================================
 
 local function main()
 
@@ -1209,22 +1844,32 @@ local function main()
 
     openModems()
 
+
     if not rednet.isOpen() then
 
         error(
-            "No hay modem conectado al ordenador del surtidor"
+            "No hay modem conectado al surtidor"
         )
     end
 
+
     refreshInventories()
 
-    -- Siempre intentar cerrar
-    -- al arrancar
+
+    -- Seguridad:
+    -- cerrar valvula al iniciar
+
     closeValve()
+
 
     while true do
 
         refreshInventories()
+
+
+        -- ============================
+        -- ERROR BARRIL PAGO
+        -- ============================
 
         if not payment then
 
@@ -1234,11 +1879,16 @@ local function main()
                 0,
                 0,
 
-                "Debe estar en: " ..
+                "No encuentro un inventario en:\n" ..
                 cfg.payment_side
             )
 
             waitWithAdmin(1)
+
+
+        -- ============================
+        -- ERROR BARRIL ALMACEN
+        -- ============================
 
         elseif not storage then
 
@@ -1248,37 +1898,52 @@ local function main()
                 0,
                 0,
 
-                "Debe estar en: " ..
+                "No encuentro un inventario en:\n" ..
                 cfg.storage_side
             )
 
             waitWithAdmin(1)
 
+
         else
+
+            -- Contar FuelTokens validos
 
             local credit =
                 countTokens(
                     payment
                 )
 
-            local invalid =
-                countInvalidItems()
+
+            -- Detectar otros items
+
+            local invalid,
+                  invalidNames =
+                getInvalidItems()
+
+
+            -- ============================
+            -- NO HAY CREDITO
+            -- ============================
 
             if credit <= 0 then
 
                 local extra =
-                    "Inserta Netherite Coins." ..
-                    "\n1 moneda = 1 " ..
+                    "Inserta Netherite Coins.\n" ..
+                    "1 Netherite Coin = 1 " ..
                     cfg.token_name
+
 
                 if invalid > 0 then
 
                     extra =
                         extra ..
-                        "\nHay " ..
-                        invalid ..
-                        " item(s) no validos."
+                        "\n\nOBJETO NO VALIDO:\n" ..
+                        invalidItemText(
+                            invalidNames
+                        )
                 end
+
 
                 show(
                     "ESPERANDO PAGO",
@@ -1288,34 +1953,59 @@ local function main()
                     extra
                 )
 
+
                 waitWithAdmin(
                     0.5
                 )
 
+
+            -- ============================
+            -- CREDITO DETECTADO
+            -- ============================
+
             else
+
+                local extra =
+                    "FuelTokens detectados: " ..
+                    tostring(credit)
+
+
+                if invalid > 0 then
+
+                    extra =
+                        extra ..
+                        "\n\nOBJETO NO VALIDO:\n" ..
+                        invalidItemText(
+                            invalidNames
+                        )
+                end
+
 
                 show(
                     "CREDITO DETECTADO",
                     credit,
                     0,
                     0,
-
-                    "Inserta mas o espera para comenzar."
+                    extra
                 )
+
 
                 local admin =
                     waitWithAdmin(
                         cfg.sale_start_delay
                     )
 
+
                 if not admin then
 
-                    -- Recontar por si el
-                    -- usuario metio mas
+                    -- Volver a contar por si
+                    -- introduce mas monedas
+
                     credit =
                         countTokens(
                             payment
                         )
+
 
                     if credit > 0 then
 
@@ -1323,25 +2013,28 @@ local function main()
                             credit
                         )
 
-                        -- No iniciar nueva venta
-                        -- hasta retirar el cambio.
+
+                        -- Esperar a que retire
+                        -- las monedas de cambio
+
                         while
                             countTokens(
                                 payment
                             ) > 0
                         do
 
-                            show(
-                                "RETIRA EL CAMBIO",
-
+                            local remaining =
                                 countTokens(
                                     payment
-                                ),
+                                )
 
+                            show(
+                                "RETIRA EL CAMBIO",
+                                remaining,
                                 0,
                                 0,
 
-                                "Vacia los FuelTokens del barril derecho."
+                                "Retira las Netherite Coins\ndel barril derecho."
                             )
 
                             sleep(0.5)
@@ -1353,12 +2046,25 @@ local function main()
     end
 end
 
-local ok, err =
-    pcall(main)
 
--- Si termina por error o CTRL+T,
--- intentar cerrar la valvula.
-pcall(closeValve)
+-- ============================================================
+-- ARRANQUE SEGURO
+-- ============================================================
+
+local ok,
+      err =
+    pcall(
+        main
+    )
+
+
+-- Intentar cerrar siempre
+-- la valvula si ocurre un error
+
+pcall(
+    closeValve
+)
+
 
 if not ok then
 
@@ -1369,5 +2075,12 @@ if not ok then
     )
 
     print("")
-    print(err)
+    print(
+        tostring(err)
+    )
+
+    print("")
+    print(
+        "La valvula se ha intentado cerrar."
+    )
 end
