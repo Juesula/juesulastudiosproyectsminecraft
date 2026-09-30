@@ -1,17 +1,29 @@
 -- ============================================================
--- LECTOR DE TANQUE - Advanced Peripherals + CC:Tweaked
+-- LECTOR DE DEPOSITO MULTI-ID / MULTI-GRUPO
+-- Advanced Peripherals + CC:Tweaked
+--
+-- Cada deposito tiene:
+--   group_id
+--   tank_id
+--
+-- Varios surtidores pueden apuntar al mismo deposito.
+-- Solo uno puede bloquearlo/repostar a la vez.
 -- ============================================================
 
 local CONFIG_FILE = "/tanque.cfg"
 local ADMIN_PIN = "2050"
+local NETWORK_VERSION = "fuelnet1"
 
 local defaults = {
-    protocol = "surtidor_tanque",
-    hostname = "tanque_1",
+    group_id = "GRUPO1",
+    tank_id = "T" .. tostring(os.getComputerID()),
 
-    -- "auto" o nombre exacto
-    -- del periferico
+    -- "auto" o nombre exacto del periferico
     tank_peripheral = "auto",
+
+    -- Si un surtidor desaparece sin liberar el deposito,
+    -- el bloqueo caduca automaticamente.
+    lock_timeout = 30.0,
 }
 
 local cfg = {}
@@ -19,240 +31,229 @@ local cfg = {}
 local tank = nil
 local tankName = nil
 
-local locked = false
+local lockOwner = nil
+local lockComputerID = nil
+local lockLastSeen = 0
+
 local lastData = nil
 local hostError = nil
 
-local function copyDefaults()
+-- ============================================================
+-- TERMINAL
+-- ============================================================
 
-    cfg = {}
+local function hasColor()
+    return term.isColor()
+end
 
-    for k, v in pairs(defaults) do
-        cfg[k] = v
+local function resetColors()
+    if hasColor() then
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
     end
 end
 
-local function saveConfig()
+local function clear()
+    resetColors()
+    term.clear()
+    term.setCursorPos(1, 1)
+end
 
-    local f =
-        fs.open(
-            CONFIG_FILE,
-            "w"
-        )
+local function writeAt(x, y, text, fg, bg)
+    local w, h = term.getSize()
 
-    if not f then
-        error(
-            "No se pudo guardar " ..
-            CONFIG_FILE
-        )
+    if y < 1 or y > h or x > w then return end
+    if x < 1 then x = 1 end
+
+    text = tostring(text or "")
+    if #text > (w - x + 1) then
+        text = text:sub(1, w - x + 1)
     end
 
-    f.write(
-        textutils.serialize(
-            cfg
-        )
-    )
+    if hasColor() then
+        if bg then term.setBackgroundColor(bg) end
+        if fg then term.setTextColor(fg) end
+    end
 
+    term.setCursorPos(x, y)
+    term.write(text)
+    resetColors()
+end
+
+local function centerText(y, text, fg, bg)
+    local w = select(1, term.getSize())
+    text = tostring(text or "")
+
+    local x = math.floor((w - #text) / 2) + 1
+    if x < 1 then x = 1 end
+
+    writeAt(x, y, text, fg, bg)
+end
+
+local function fillLine(y, bg)
+    local w = select(1, term.getSize())
+
+    if hasColor() then term.setBackgroundColor(bg) end
+
+    term.setCursorPos(1, y)
+    term.write(string.rep(" ", w))
+    resetColors()
+end
+
+-- ============================================================
+-- IDENTIDAD / RED
+-- ============================================================
+
+local function cleanID(value)
+    value = tostring(value or "")
+    value = value:gsub("^%s+", ""):gsub("%s+$", "")
+
+    if value == "" then return "SIN_ID" end
+    return value
+end
+
+local function networkSafe(value)
+    value = cleanID(value):lower()
+    value = value:gsub("[^%w_%-]", "_")
+    return value
+end
+
+local function protocolName()
+    return "fuelnet_" .. networkSafe(cfg.group_id)
+end
+
+local function hostname()
+    return "tank_" ..
+        networkSafe(cfg.group_id) .. "_" ..
+        networkSafe(cfg.tank_id)
+end
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+
+local function copyDefaults()
+    cfg = {}
+    for k, v in pairs(defaults) do cfg[k] = v end
+end
+
+local function saveConfig()
+    local f = fs.open(CONFIG_FILE, "w")
+    if not f then error("No se pudo guardar " .. CONFIG_FILE) end
+
+    f.write(textutils.serialize(cfg))
     f.close()
 end
 
 local function loadConfig()
-
     copyDefaults()
 
-    if fs.exists(
-        CONFIG_FILE
-    ) then
-
-        local f =
-            fs.open(
-                CONFIG_FILE,
-                "r"
-            )
+    if fs.exists(CONFIG_FILE) then
+        local f = fs.open(CONFIG_FILE, "r")
 
         if f then
-
-            local data =
-                textutils.unserialize(
-                    f.readAll()
-                )
-
+            local data = textutils.unserialize(f.readAll())
             f.close()
 
-            if type(data) ==
-                "table"
-            then
-
+            if type(data) == "table" then
                 for k, v in pairs(data) do
-
-                    if defaults[k]
-                        ~= nil
-                    then
-
-                        cfg[k] = v
-                    end
+                    if defaults[k] ~= nil then cfg[k] = v end
                 end
             end
         end
     end
 
+    cfg.group_id = cleanID(cfg.group_id)
+    cfg.tank_id = cleanID(cfg.tank_id)
+
     saveConfig()
 end
 
-local function clear()
-
-    term.clear()
-
-    term.setCursorPos(
-        1,
-        1
-    )
-end
+-- ============================================================
+-- MODEM
+-- ============================================================
 
 local function openModems()
-
-    for _, name in ipairs(
-        peripheral.getNames()
-    ) do
-
-        local types = {
-            peripheral.getType(name)
-        }
+    for _, name in ipairs(peripheral.getNames()) do
+        local types = {peripheral.getType(name)}
 
         for _, t in ipairs(types) do
-
             if t == "modem" then
-                pcall(
-                    rednet.open,
-                    name
-                )
+                pcall(rednet.open, name)
             end
         end
     end
 end
 
-local function hasMethod(
-    obj,
-    method
-)
+-- ============================================================
+-- DEPOSITO
+-- ============================================================
 
-    return obj and
-        type(
-            obj[method]
-        ) == "function"
+local function hasMethod(obj, method)
+    return obj and type(obj[method]) == "function"
 end
 
 local function findTank()
-
     tank = nil
     tankName = nil
 
-    -- Nombre manual
-    if cfg.tank_peripheral ~= ""
-        and
-        cfg.tank_peripheral ~= "auto"
-    then
+    if cfg.tank_peripheral ~= "" and
+       cfg.tank_peripheral ~= "auto" then
 
-        local p =
-            peripheral.wrap(
-                cfg.tank_peripheral
-            )
+        local p = peripheral.wrap(cfg.tank_peripheral)
 
         if p and (
-            hasMethod(p, "info")
-            or
-            hasMethod(p, "getInfo")
-            or
+            hasMethod(p, "info") or
+            hasMethod(p, "getInfo") or
             hasMethod(p, "tanks")
         ) then
-
             tank = p
-
-            tankName =
-                peripheral.getName(
-                    p
-                )
-
+            tankName = peripheral.getName(p)
             return true
         end
 
         return false
     end
 
-    -- Advanced Peripherals moderno
-    local p, name
+    local foundName = nil
 
-    p =
-        peripheral.find(
-            "fluid_tank",
-
-            function(n)
-
-                name = n
-
-                return true
-            end
-        )
+    local p = peripheral.find(
+        "fluid_tank",
+        function(name)
+            foundName = name
+            return true
+        end
+    )
 
     if p then
-
         tank = p
-
-        tankName =
-            name or
-            peripheral.getName(p)
-
+        tankName = foundName or peripheral.getName(p)
         return true
     end
 
-    -- Advanced Peripherals antiguo
-    p =
-        peripheral.find(
-            "fluidTank",
-
-            function(n)
-
-                name = n
-
-                return true
-            end
-        )
+    p = peripheral.find(
+        "fluidTank",
+        function(name)
+            foundName = name
+            return true
+        end
+    )
 
     if p then
-
         tank = p
-
-        tankName =
-            name or
-            peripheral.getName(p)
-
+        tankName = foundName or peripheral.getName(p)
         return true
     end
 
-    -- Fallback para API generica
-    -- de fluidos de CC:Tweaked
-    for _, n in ipairs(
-        peripheral.getNames()
-    ) do
-
-        local obj =
-            peripheral.wrap(n)
+    for _, name in ipairs(peripheral.getNames()) do
+        local obj = peripheral.wrap(name)
 
         if obj and (
-            hasMethod(
-                obj,
-                "getInfo"
-            )
-            or
-            hasMethod(
-                obj,
-                "tanks"
-            )
+            hasMethod(obj, "getInfo") or
+            hasMethod(obj, "tanks")
         ) then
-
             tank = obj
-            tankName = n
-
+            tankName = name
             return true
         end
     end
@@ -260,708 +261,619 @@ local function findTank()
     return false
 end
 
-local function fluidName(
-    fluid
-)
+local function fluidName(fluid)
+    if type(fluid) == "string" then return fluid end
+    if type(fluid) ~= "table" then return "vacio" end
 
-    if type(fluid) ==
-        "string"
-    then
-
-        return fluid
-    end
-
-    if type(fluid) ~=
-        "table"
-    then
-
-        return "vacio"
-    end
-
-    return
-        fluid.name
-        or fluid.id
-        or fluid.registryName
-        or fluid.displayName
-        or "desconocido"
+    return fluid.name or
+           fluid.id or
+           fluid.registryName or
+           fluid.displayName or
+           "desconocido"
 end
 
-local function fluidAmount(
-    fluid
-)
-
-    if type(fluid) ~=
-        "table"
-    then
-
-        return 0
-    end
+local function fluidAmount(fluid)
+    if type(fluid) ~= "table" then return 0 end
 
     return tonumber(
-        fluid.amount
-        or fluid.count
-        or fluid.quantity
-        or 0
+        fluid.amount or
+        fluid.count or
+        fluid.quantity or
+        0
     ) or 0
 end
 
 local function readTank()
-
-    if not tank and
-        not findTank()
-    then
-
-        return nil,
-            "No encuentro el tanque/periferico"
+    if not tank and not findTank() then
+        return nil, "No encuentro el deposito/periferico"
     end
 
-    -- =========================
-    -- ADVANCED PERIPHERALS 0.8+
-    -- =========================
+    if hasMethod(tank, "info") then
+        local ok, info = pcall(tank.info)
 
-    if hasMethod(
-        tank,
-        "info"
-    ) then
-
-        local ok, info =
-            pcall(
-                tank.info
-            )
-
-        if not ok or
-            type(info) ~=
-            "table"
-        then
-
-            return nil,
-                "Fallo tank.info()"
+        if not ok or type(info) ~= "table" then
+            return nil, "Fallo tank.info()"
         end
 
         local amount = 0
         local name = "vacio"
 
-        if info.fluid ~=
-            nil
-        then
-
-            amount =
-                fluidAmount(
-                    info.fluid
-                )
-
-            name =
-                fluidName(
-                    info.fluid
-                )
+        if info.fluid ~= nil then
+            amount = fluidAmount(info.fluid)
+            name = fluidName(info.fluid)
         end
 
-        -- Compatibilidad extra
-        if amount == 0 and
-            tonumber(
-                info.amount
-            )
-        then
-
-            amount =
-                tonumber(
-                    info.amount
-                )
+        if amount == 0 and tonumber(info.amount) then
+            amount = tonumber(info.amount)
         end
 
         return {
-            ok = true,
-
-            amount =
-                amount,
-
-            capacity =
-                tonumber(
-                    info.capacity
-                    or 0
-                ) or 0,
-
-            fluid =
-                name,
-
-            peripheral =
-                tankName,
+            amount = amount,
+            capacity = tonumber(info.capacity or 0) or 0,
+            fluid = name,
+            peripheral = tankName,
         }
     end
 
-    -- =========================
-    -- ADVANCED PERIPHERALS 0.7
-    -- =========================
+    if hasMethod(tank, "getInfo") then
+        local ok, info = pcall(tank.getInfo)
 
-    if hasMethod(
-        tank,
-        "getInfo"
-    ) then
-
-        local ok, info =
-            pcall(
-                tank.getInfo
-            )
-
-        if not ok or
-            type(info) ~=
-            "table"
-        then
-
-            return nil,
-                "Fallo tank.getInfo()"
+        if not ok or type(info) ~= "table" then
+            return nil, "Fallo tank.getInfo()"
         end
 
         return {
-            ok = true,
-
-            amount =
-                tonumber(
-                    info.amount
-                    or 0
-                ) or 0,
-
-            capacity =
-                tonumber(
-                    info.capacity
-                    or 0
-                ) or 0,
-
-            fluid =
-                fluidName(
-                    info.fluid
-                ),
-
-            peripheral =
-                tankName,
+            amount = tonumber(info.amount or 0) or 0,
+            capacity = tonumber(info.capacity or 0) or 0,
+            fluid = fluidName(info.fluid),
+            peripheral = tankName,
         }
     end
 
-    -- =========================
-    -- FALLBACK CC:TWEAKED
-    -- =========================
+    if hasMethod(tank, "tanks") then
+        local ok, tanks = pcall(tank.tanks)
 
-    if hasMethod(
-        tank,
-        "tanks"
-    ) then
-
-        local ok, tanks =
-            pcall(
-                tank.tanks
-            )
-
-        if not ok or
-            type(tanks) ~=
-            "table"
-        then
-
-            return nil,
-                "Fallo tank.tanks()"
+        if not ok or type(tanks) ~= "table" then
+            return nil, "Fallo tank.tanks()"
         end
 
         local amount = 0
         local capacity = 0
         local name = "vacio"
 
-        for _, entry in pairs(
-            tanks
-        ) do
+        for _, entry in pairs(tanks) do
+            if type(entry) == "table" then
+                amount = amount +
+                    (tonumber(entry.amount or entry.count or 0) or 0)
 
-            if type(entry) ==
-                "table"
-            then
+                capacity = capacity +
+                    (tonumber(entry.capacity or 0) or 0)
 
-                amount =
-                    amount +
-                    (
-                        tonumber(
-                            entry.amount
-                            or entry.count
-                            or 0
-                        )
-                        or 0
-                    )
-
-                capacity =
-                    capacity +
-                    (
-                        tonumber(
-                            entry.capacity
-                            or 0
-                        )
-                        or 0
-                    )
-
-                if name == "vacio"
-                    and
-                    (
-                        entry.name
-                        or entry.id
-                    )
-                then
-
-                    name =
-                        entry.name
-                        or entry.id
+                if name == "vacio" and (entry.name or entry.id) then
+                    name = entry.name or entry.id
                 end
             end
         end
 
         return {
-            ok = true,
-
-            amount =
-                amount,
-
-            capacity =
-                capacity,
-
-            fluid =
-                name,
-
-            peripheral =
-                tankName,
+            amount = amount,
+            capacity = capacity,
+            fluid = name,
+            peripheral = tankName,
         }
     end
 
     tank = nil
     tankName = nil
 
-    return nil,
-        "API del tanque no reconocida"
+    return nil, "API del deposito no reconocida"
 end
 
-local function registerHost()
+-- ============================================================
+-- HOST REDNET
+-- ============================================================
 
+local hostedProtocol = nil
+
+local function registerHost()
     hostError = nil
 
-    local ok, err =
-        pcall(
-            rednet.host,
-            cfg.protocol,
-            cfg.hostname
-        )
+    if hostedProtocol then
+        pcall(rednet.unhost, hostedProtocol)
+        hostedProtocol = nil
+    end
 
-    if not ok then
+    local protocol = protocolName()
 
-        hostError =
-            tostring(err)
+    local ok, err = pcall(
+        rednet.host,
+        protocol,
+        hostname()
+    )
+
+    if ok then
+        hostedProtocol = protocol
+    else
+        hostError = tostring(err)
     end
 
     return ok
 end
 
-local function showStatus(
-    message
-)
+-- ============================================================
+-- BLOQUEO
+-- ============================================================
+
+local function clearLock()
+    lockOwner = nil
+    lockComputerID = nil
+    lockLastSeen = 0
+end
+
+local function lockExpired()
+    if not lockOwner then return false end
+    return (os.clock() - lockLastSeen) > cfg.lock_timeout
+end
+
+local function refreshLock()
+    if lockExpired() then clearLock() end
+end
+
+local function isOwner(sender, stationID)
+    refreshLock()
+
+    return lockOwner ~= nil and
+           sender == lockComputerID and
+           cleanID(stationID) == cleanID(lockOwner)
+end
+
+-- ============================================================
+-- UI
+-- ============================================================
+
+local function drawStatus(message)
+    local _, h = term.getSize()
 
     clear()
 
-    print("================================")
-    print(" LECTOR DE TANQUE")
-    print("================================")
+    if hasColor() then
+        fillLine(1, colors.blue)
+        centerText(1, "LECTOR DEPOSITO", colors.white, colors.blue)
+    else
+        centerText(1, "LECTOR DEPOSITO")
+    end
 
-    print(
-        "Host: " ..
-        cfg.hostname
-    )
+    centerText(2, cleanID(cfg.group_id) .. " / " .. cleanID(cfg.tank_id))
 
-    print(
-        "Protocolo: " ..
-        cfg.protocol
-    )
+    writeAt(2, 4, "Host:")
+    writeAt(9, 4, hostname())
 
-    print(
-        "Tanque: " ..
-        tostring(
-            tankName
-            or "NO DETECTADO"
-        )
-    )
+    writeAt(2, 5, "Tanque:")
+    writeAt(10, 5, tostring(tankName or "NO DETECTADO"))
 
-    print(
-        "Bloqueado: " ..
-        (
-            locked
-            and "SI"
-            or "NO"
-        )
-    )
+    writeAt(2, 7, "Estado:")
+
+    if lockOwner then
+        writeAt(10, 7, "OCUPADO", colors.yellow)
+        writeAt(2, 8, "Surtidor:")
+        writeAt(12, 8, tostring(lockOwner))
+    else
+        writeAt(10, 7, "LIBRE", colors.lime)
+    end
 
     if lastData then
+        writeAt(2, 10, "Cantidad:")
+        writeAt(13, 10, tostring(lastData.amount) .. " mB")
 
-        print("")
+        writeAt(2, 11, "Capacidad:")
+        writeAt(13, 11, tostring(lastData.capacity) .. " mB")
 
-        print(
-            "Cantidad: " ..
-            tostring(
-                lastData.amount
-            ) ..
-            " mB"
-        )
-
-        print(
-            "Capacidad: " ..
-            tostring(
-                lastData.capacity
-            ) ..
-            " mB"
-        )
-
-        print(
-            "Fluido: " ..
-            tostring(
-                lastData.fluid
-            )
-        )
+        writeAt(2, 12, "Fluido:")
+        writeAt(11, 12, tostring(lastData.fluid))
     end
 
     if hostError then
-
-        print("")
-
-        print(
-            "ERROR HOST: " ..
-            hostError
-        )
-    end
-
-    if message then
-
-        print("")
-        print(message)
-    end
-
-    print("")
-
-    if locked then
-
-        print(
-            "Configuracion bloqueada durante venta"
-        )
-
-    else
-
-        print(
-            "[C] Administrador"
-        )
+        writeAt(2, h - 3, "HOST ERROR:", colors.red)
+        writeAt(2, h - 2, hostError, colors.red)
+    elseif message then
+        writeAt(2, h - 2, tostring(message))
     end
 end
 
-local function askText(
-    label,
-    current
-)
+-- ============================================================
+-- ADMIN
+-- ============================================================
 
-    write(
-        label ..
-        " [" ..
-        tostring(current) ..
-        "]: "
-    )
+local function promptText(title, current)
+    clear()
+    centerText(1, title)
 
-    local value =
-        read()
+    print("")
+    print("Actual:")
+    print(tostring(current))
+    print("")
+    write("> ")
 
-    if value == "" then
-        return current
-    end
-
+    local value = read()
+    if value == "" then return current end
     return value
 end
 
-local function adminMenu()
+local function promptNumber(title, current, minimum)
+    local text = promptText(title, current)
+    if tostring(text) == tostring(current) then return current end
+
+    local number = tonumber(text)
+
+    if not number or (minimum and number < minimum) then
+        clear()
+        centerText(5, "VALOR INVALIDO", colors.red)
+        sleep(1)
+        return current
+    end
+
+    return number
+end
+
+local function adminOptions()
+    return {
+        {
+            label="Grupo",
+            value=function() return cfg.group_id end,
+            edit=function()
+                cfg.group_id = cleanID(promptText("ID DEL GRUPO", cfg.group_id))
+            end
+        },
+
+        {
+            label="ID deposito",
+            value=function() return cfg.tank_id end,
+            edit=function()
+                cfg.tank_id = cleanID(promptText("ID DEL DEPOSITO", cfg.tank_id))
+            end
+        },
+
+        {
+            label="Periferico",
+            value=function() return cfg.tank_peripheral end,
+            edit=function()
+                cfg.tank_peripheral = promptText(
+                    "Periferico o auto",
+                    cfg.tank_peripheral
+                )
+                findTank()
+            end
+        },
+
+        {
+            label="Timeout bloqueo",
+            value=function() return cfg.lock_timeout end,
+            edit=function()
+                cfg.lock_timeout = promptNumber(
+                    "Timeout bloqueo",
+                    cfg.lock_timeout,
+                    5
+                )
+            end
+        },
+
+        {
+            label="Buscar deposito",
+            value=function() return "EJECUTAR" end,
+            edit=function()
+                cfg.tank_peripheral = "auto"
+                findTank()
+                drawStatus(
+                    tankName and
+                    ("Detectado: " .. tostring(tankName)) or
+                    "No encontrado"
+                )
+                sleep(1.5)
+            end
+        },
+
+        {
+            label="Liberar bloqueo",
+            value=function() return lockOwner or "LIBRE" end,
+            edit=clearLock
+        },
+
+        {
+            label="GUARDAR Y SALIR",
+            value=function() return "" end,
+            exit=true
+        }
+    }
+end
+
+local function drawAdmin(selected, firstVisible)
+    local options = adminOptions()
+    local w, h = term.getSize()
+    local visible = math.max(4, h - 6)
 
     clear()
 
-    print(
-        "ADMINISTRADOR TANQUE"
-    )
+    if hasColor() then
+        fillLine(1, colors.blue)
+        centerText(1, "CONFIG DEPOSITO", colors.white, colors.blue)
+    else
+        centerText(1, "CONFIG DEPOSITO")
+    end
 
-    print("")
+    centerText(2, "FLECHAS + ENTER")
 
-    write("Codigo: ")
+    local last = math.min(#options, firstVisible + visible - 1)
+    local y = 4
 
-    local pin =
-        read("*")
+    for i = firstVisible, last do
+        local option = options[i]
+        local prefix = i == selected and "> " or "  "
+        local value = tostring(option.value())
 
-    if pin ~= ADMIN_PIN then
+        local text = option.exit
+            and (prefix .. option.label)
+            or (prefix .. option.label .. ": " .. value)
 
-        print("")
-        print("CODIGO INCORRECTO")
+        if #text > w then text = text:sub(1, w) end
 
-        sleep(2)
+        local fg, bg = colors.white, colors.black
 
+        if i == selected and hasColor() then
+            fg, bg = colors.black, colors.lightGray
+            fillLine(y, bg)
+        end
+
+        writeAt(1, y, text, fg, bg)
+        y = y + 1
+    end
+
+    if firstVisible > 1 then
+        writeAt(w, 3, "^", colors.yellow)
+    end
+
+    if last < #options then
+        writeAt(w, h - 1, "v", colors.yellow)
+    end
+
+    centerText(h, "BACKSPACE = GUARDAR/SALIR", colors.lightGray)
+    return visible
+end
+
+local function adminMenu()
+    clear()
+    centerText(2, "ACCESO RESTRINGIDO")
+    centerText(4, "Introduce codigo")
+    term.setCursorPos(2, 6)
+    write("PIN: ")
+
+    if read("*") ~= ADMIN_PIN then
+        clear()
+        centerText(5, "CODIGO INCORRECTO", colors.red)
+        sleep(1.5)
         return
     end
 
-    local oldProtocol =
-        cfg.protocol
+    local selected = 1
+    local firstVisible = 1
 
     while true do
+        local options = adminOptions()
+        local visible = drawAdmin(selected, firstVisible)
 
-        clear()
+        local event, a = os.pullEvent()
 
-        print("================================")
-        print(" CONFIGURACION LECTOR")
-        print("================================")
+        if event == "key" then
+            if a == keys.up then
+                selected = selected - 1
+                if selected < 1 then selected = #options end
 
-        print(
-            "1 Protocolo: " ..
-            cfg.protocol
-        )
+            elseif a == keys.down then
+                selected = selected + 1
+                if selected > #options then selected = 1 end
 
-        print(
-            "2 Hostname: " ..
-            cfg.hostname
-        )
+            elseif a == keys.enter then
+                local option = options[selected]
 
-        print(
-            "3 Tanque/periferico: " ..
-            cfg.tank_peripheral
-        )
+                if option.exit then
+                    saveConfig()
+                    findTank()
+                    clearLock()
+                    registerHost()
+                    return
+                end
 
-        print(
-            "4 Buscar tanque automaticamente"
-        )
+                if option.edit then
+                    option.edit()
+                    saveConfig()
+                end
 
-        print("")
-        print("0 GUARDAR Y SALIR")
-        print("")
+            elseif a == keys.backspace then
+                saveConfig()
+                findTank()
+                clearLock()
+                registerHost()
+                return
+            end
 
-        write("> ")
-
-        local option =
-            read()
-
-        if option == "1" then
-
-            cfg.protocol =
-                askText(
-                    "Protocolo",
-                    cfg.protocol
-                )
-
-        elseif option == "2" then
-
-            cfg.hostname =
-                askText(
-                    "Hostname",
-                    cfg.hostname
-                )
-
-        elseif option == "3" then
-
-            cfg.tank_peripheral =
-                askText(
-                    "Nombre periferico o auto",
-                    cfg.tank_peripheral
-                )
-
-        elseif option == "4" then
-
-            cfg.tank_peripheral =
-                "auto"
-
-            findTank()
-
-            print(
-                "Detectado: " ..
-                tostring(
-                    tankName
-                    or "ninguno"
-                )
-            )
-
-            sleep(1.5)
-
-        elseif option == "0" then
-
-            pcall(
-                rednet.unhost,
-                oldProtocol
-            )
-
-            saveConfig()
-
-            findTank()
-
-            registerHost()
-
-            showStatus(
-                "Configuracion guardada"
-            )
-
-            sleep(1)
-
-            return
+        elseif event == "mouse_scroll" then
+            if a > 0 then
+                selected = math.min(#options, selected + 1)
+            else
+                selected = math.max(1, selected - 1)
+            end
         end
+
+        if selected < firstVisible then firstVisible = selected end
+
+        if selected >= firstVisible + visible then
+            firstVisible = selected - visible + 1
+        end
+
+        if selected == 1 then firstVisible = 1 end
     end
 end
 
-local function sendReply(
-    target,
-    data
-)
+-- ============================================================
+-- FUELNET
+-- ============================================================
+
+local function validPacket(message)
+    return type(message) == "table" and
+           message.system == NETWORK_VERSION and
+           cleanID(message.group_id) == cleanID(cfg.group_id) and
+           cleanID(message.tank_id) == cleanID(cfg.tank_id)
+end
+
+local function reply(target, data)
+    data = data or {}
+
+    data.system = NETWORK_VERSION
+    data.group_id = cleanID(cfg.group_id)
+    data.tank_id = cleanID(cfg.tank_id)
 
     rednet.send(
         target,
         data,
-        cfg.protocol
+        protocolName()
     )
 end
 
-local function main()
+local function handleMessage(sender, message)
+    if not validPacket(message) then return end
 
-    loadConfig()
+    refreshLock()
 
-    openModems()
+    local command = message.command
+    local stationID = cleanID(message.station_id)
 
-    if not rednet.isOpen() then
+    if command == "begin" then
+        if not lockOwner or isOwner(sender, stationID) then
+            lockOwner = stationID
+            lockComputerID = sender
+            lockLastSeen = os.clock()
 
-        error(
-            "No hay modem conectado al lector del tanque"
-        )
-    end
+            reply(sender, {
+                ok=true,
+                owner=lockOwner
+            })
 
-    findTank()
+            drawStatus("Sesion iniciada")
+        else
+            reply(sender, {
+                ok=false,
+                error="BUSY",
+                owner=lockOwner
+            })
+        end
 
-    registerHost()
+    elseif command == "read" then
+        if lockOwner and not isOwner(sender, stationID) then
+            reply(sender, {
+                ok=false,
+                error="BUSY",
+                owner=lockOwner
+            })
+            return
+        end
 
-    showStatus(
-        "Esperando al surtidor..."
-    )
+        if lockOwner then
+            lockLastSeen = os.clock()
+        end
 
-    while true do
+        local data, err = readTank()
 
-        local event,
-              value1,
-              value2,
-              value3 =
-            os.pullEvent()
+        if data then
+            lastData = data
 
-        -- =========================
-        -- MENU ADMIN
-        -- =========================
+            reply(sender, {
+                ok=true,
+                amount=data.amount,
+                capacity=data.capacity,
+                fluid=data.fluid,
+                peripheral=data.peripheral,
+                owner=lockOwner
+            })
 
-        if event == "key"
-            and value1 ==
-                keys.c
-        then
+            drawStatus("Lectura para " .. stationID)
+        else
+            reply(sender, {
+                ok=false,
+                error=err
+            })
 
-            if locked then
+            drawStatus("ERROR: " .. tostring(err))
+        end
 
-                showStatus(
-                    "No se puede configurar durante un repostaje"
-                )
+    elseif command == "end" then
+        if not lockOwner or isOwner(sender, stationID) then
+            clearLock()
 
-            else
+            reply(sender, {
+                ok=true
+            })
 
-                adminMenu()
-            end
-
-        -- =========================
-        -- REDNET
-        -- =========================
-
-        elseif event ==
-            "rednet_message"
-        then
-
-            local sender =
-                value1
-
-            local message =
-                value2
-
-            local protocol =
-                value3
-
-            if protocol ==
-                cfg.protocol
-            then
-
-                -- El surtidor avisa
-                -- que comienza una venta
-                if message ==
-                    "begin"
-                then
-
-                    locked = true
-
-                    showStatus(
-                        "Venta iniciada por PC " ..
-                        sender
-                    )
-
-                -- Venta terminada
-                elseif message ==
-                    "end"
-                then
-
-                    locked = false
-
-                    showStatus(
-                        "Venta finalizada por PC " ..
-                        sender
-                    )
-
-                -- Solicitud de lectura
-                elseif message ==
-                    "read"
-                then
-
-                    local data, err =
-                        readTank()
-
-                    if data then
-
-                        lastData =
-                            data
-
-                        sendReply(
-                            sender,
-                            data
-                        )
-
-                        showStatus(
-                            "Ultima lectura para PC " ..
-                            sender
-                        )
-
-                    else
-
-                        sendReply(
-                            sender,
-                            {
-                                ok = false,
-                                error = err
-                            }
-                        )
-
-                        showStatus(
-                            "ERROR: " ..
-                            tostring(err)
-                        )
-                    end
-                end
-            end
+            drawStatus("Deposito liberado")
+        else
+            reply(sender, {
+                ok=false,
+                error="NOT_OWNER",
+                owner=lockOwner
+            })
         end
     end
 end
 
-local ok, err =
-    pcall(main)
+-- ============================================================
+-- MAIN
+-- ============================================================
+
+local function main()
+    loadConfig()
+    openModems()
+
+    if not rednet.isOpen() then
+        error("No hay modem conectado")
+    end
+
+    findTank()
+    registerHost()
+    drawStatus("Esperando surtidores...")
+
+    local timer = os.startTimer(1)
+
+    while true do
+        local event, a, b, c = os.pullEvent()
+
+        if event == "key" and a == keys.c then
+            adminMenu()
+            drawStatus("Esperando surtidores...")
+
+        elseif event == "rednet_message" and c == protocolName() then
+            handleMessage(a, b)
+
+        elseif event == "timer" and a == timer then
+            local wasLocked = lockOwner ~= nil
+
+            refreshLock()
+
+            if wasLocked and not lockOwner then
+                drawStatus("Bloqueo caducado")
+            end
+
+            timer = os.startTimer(1)
+        end
+    end
+end
+
+local ok, err = pcall(main)
 
 if not ok then
-
     clear()
 
-    print(
-        "ERROR FATAL DEL LECTOR"
-    )
+    if hasColor() then term.setTextColor(colors.red) end
+    print("ERROR FATAL DEL LECTOR")
+    resetColors()
 
     print("")
-    print(err)
+    print(tostring(err))
 end
