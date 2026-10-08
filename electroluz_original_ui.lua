@@ -1,49 +1,80 @@
 -- ============================================================
--- ELECTROLUZ: MEDIDOR IZQUIERDO (sin barriles)
--- CC:Tweaked + Create Crafts & Additions
--- Basado en la UI y la administracion del surtidor original.
+-- ELECTROLUZ - ADAPTACION DEL SURTIDOR ORIGINAL
+-- CC:Tweaked + Create Crafts & Additions + Lightman's Currency
 --
--- El Relay ELECTRICO va a la IZQUIERDA del ordenador.
--- No se usan inventarios de monedas, ni acumulador ni ordenador remoto.
--- La pantalla calcula el coste en FuelTokens (NO los cobra).
+-- CONSERVA la interfaz, menus y cobro originales.
+-- PAGO REAL: Diamond Coins + Netherite Coins (1 NC = 10 DC).
+-- TARIFA: 3 DC por 10 FE (redondeo por bloque).
+-- Item: lightmanscurrency:coin_diamond
+-- Barril derecho = insertar y recibir cambio; abajo = caja de ingresos.
+-- Relay electrico a la izquierda; redstone de control por detras.
+-- F/Click: iniciar/parar (PIN obligatorio para detener 24h).
+-- M: alternar 24 horas / repostada. C: administracion.
+-- R: reanudar sesion 24h protegida tras pausa/reinicio.
+-- IMPORTANTE: getThroughput() = flujo instantaneo, conversion FE/t estimada.
+-- Precisa calibracion; limite el flujo para evitar sobreentrega.
+-- Si no hay flujo, no es posible distinguir falta de energia de falta de demanda.
 --
--- F o click: comenzar/parar suministro
--- C: menu oculto, PIN 2050, flechas, ENTER, BACKSPACE
+-- Cliente: F / click = iniciar o parar
+-- Administracion oculta: C, PIN 2050, flechas, ENTER, BACKSPACE
 --
--- getThroughput() da flujo ACTUAL, no un contador acumulado.
--- Se estima FE = flujo * segundos * ticks_por_segundo.
--- Verificar esta conversion en la version concreta del mod.
+-- MEDICION: Redstone Relay electrico de Create Crafts & Additions
+-- getThroughput() devuelve una lectura de flujo actual en FE.
+-- Se estima el consumo como FE/t * ticks transcurridos (~20 t/s).
+-- NO es un contador fiscal ni garantiza corte exacto sin calibracion.
+--
+-- IMPORTANTE: un Relay por cliente; no compartir ese paso de energia.
+-- Configurar modo DIRECTO para activacion por senal continua de redstone.
 -- ============================================================
 
-local CONFIG_FILE = "/electroluz_original.cfg" -- conserva las preferencias anteriores
-local LEDGER_FILE = "/electroluz_consumo.dat"
+local CONFIG_FILE = "/electroluz_diamond.cfg"
+local LEDGER_FILE = "/electroluz_diamond_seguro_ledger.dat"
 local ADMIN_PIN = "2050"
+local DIAMOND_COIN_ID = "lightmanscurrency:coin_diamond"
+local NETHERITE_COIN_ID = "lightmanscurrency:coin_netherite"
+local NETHERITE_VALUE = 10
 
 local defaults = {
     station_name = "ELECTROLUZ",
+    admin_pin = ADMIN_PIN,
     out_of_service = false,
+
+    -- Se conservan Grupo + ID de estacion + ID de medidor.
     group_id = "GRUPO1",
     station_id = "S" .. tostring(os.getComputerID()),
     meter_id = "E1",
-    fe_per_token = 10000,
-    -- Solo lectura por la izquierda. No hay barril de pago.
-    relay_side = "left",
-    open_side = "back",  -- salida redstone para habilitar el Relay
-    close_side = "right", -- solo modo pulso; nunca LEFT (ocupado por Relay)
+    relay_name = "left", -- Relay electrico a la izquierda.
+
+    token_name = "DiamondCoin",
+    token_item_id = DIAMOND_COIN_ID,
+    coins_per_block = 3,
+    fe_per_block = 10,
+    mode = "repostada", -- Alternar con M: repostada/24horas.
+    max_hours = 24,
+    ticks_per_second = 20, -- CALIBRAR segun version del Relay.
+
+    payment_side = "right",
+    storage_side = "bottom",
+
+    open_side = "back", -- Redstone hacia el Relay electrico.
+    close_side = "top", -- Solo para el modo de pulsos; left ocupado por Relay.
     pulse_time = 0.15,
-    control_mode = "directo",
-    sample_time = 0.10,
-    no_flow_limit = 0,   -- 0: la casa puede estar sin consumir temporalmente
+    control_mode = "directo", -- directo=mantener senal; pulso=tu latch original.
+
+    sample_time = 0.05,
+    no_flow_seconds = 5, -- Sin flujo, cortar en ambos modos tras 5 segundos.
     flow_epsilon_fe = 0,
     flow_grace_time = 1.0,
-    ticks_per_second = 20,  -- FACTOR ESTIMADO: calibrar en la version del mod
+
+    change_retry_time = 0.5,
 }
 
 local cfg = {}
-local relay = nil
-local ledger = {total_fe = 0, sessions = 0}
+local payment, storage = nil, nil
+local paymentName, storageName = nil, nil
+local relay, relayName = nil, nil
 local buttonBounds = {x1=1, x2=1, y1=1, y2=1}
-
+local adminCancelRequested = false
 
 -- ============================================================
 -- TERMINAL
@@ -132,109 +163,334 @@ end
 
 local function loadConfig()
     copyDefaults()
+
     if fs.exists(CONFIG_FILE) then
         local f = fs.open(CONFIG_FILE, "r")
         if f then
-            local ok, data = pcall(textutils.unserialize, f.readAll())
+            local data = textutils.unserialize(f.readAll())
             f.close()
-            if ok and type(data) == "table" then
-                for key in pairs(defaults) do
-                    if data[key] ~= nil then cfg[key] = data[key] end
+
+            if type(data) == "table" then
+                if data.coin_id then cfg.token_item_id = data.coin_id end
+                if data.currency_name then cfg.token_name = data.currency_name end
+
+                for k, v in pairs(data) do
+                    if defaults[k] ~= nil then cfg[k] = v end
                 end
             end
         end
     end
-    cfg.relay_side = "left" -- exigido por esta instalacion
+
     cfg.group_id = cleanID(cfg.group_id)
     cfg.station_id = cleanID(cfg.station_id)
     cfg.meter_id = cleanID(cfg.meter_id)
-    if type(cfg.fe_per_token) ~= "number" or cfg.fe_per_token < 1 then cfg.fe_per_token = defaults.fe_per_token end
-    if type(cfg.sample_time) ~= "number" or cfg.sample_time < 0.05 then cfg.sample_time = defaults.sample_time end
-    if type(cfg.ticks_per_second) ~= "number" or cfg.ticks_per_second < 1 then cfg.ticks_per_second = 20 end
-    if type(cfg.flow_epsilon_fe) ~= "number" or cfg.flow_epsilon_fe < 0 then cfg.flow_epsilon_fe = 0 end
-    if type(cfg.flow_grace_time) ~= "number" or cfg.flow_grace_time < 0 then cfg.flow_grace_time = 1 end
-    if type(cfg.no_flow_limit) ~= "number" or cfg.no_flow_limit < 0 then cfg.no_flow_limit = 0 end
+    if type(cfg.coins_per_block) ~= "number" or cfg.coins_per_block < 1 then cfg.coins_per_block = 3 end
+    cfg.coins_per_block = math.floor(cfg.coins_per_block)
+    if type(cfg.fe_per_block) ~= "number" or cfg.fe_per_block <= 0 then cfg.fe_per_block = 10 end
+    if type(cfg.sample_time) ~= "number" or cfg.sample_time < 0.05 then cfg.sample_time = 0.05 end
+    if type(cfg.no_flow_seconds) ~= "number" or cfg.no_flow_seconds < 0.5 then cfg.no_flow_seconds = 5 end
+    if type(cfg.ticks_per_second) ~= "number" or cfg.ticks_per_second <= 0 then cfg.ticks_per_second = 20 end
     if cfg.control_mode ~= "directo" and cfg.control_mode ~= "pulso" then cfg.control_mode = "directo" end
-    if cfg.open_side == "left" then cfg.open_side = "back" end
-    if cfg.close_side == "left" then cfg.close_side = "right" end
+    if cfg.mode ~= "repostada" and cfg.mode ~= "24horas" then cfg.mode = "repostada" end
+    -- La modalidad continua dura como maximo 24 horas reales.
+    cfg.max_hours = 24
+    -- Forzar diamante aun si una configuracion anterior tenia netherite.
+    cfg.token_item_id = DIAMOND_COIN_ID
+    cfg.token_name = "DiamondCoin"
+
     saveConfig()
 end
 
+-- ============================================================
+-- PERIFERICOS / INVENTARIOS
+-- ============================================================
 
--- ============================================================
--- PERIFERICO IZQUIERDO: EL RELE ELECTRICO
--- ============================================================
+-- Busca el Relay ELECTRICO, no el redstone_relay propio de CC:Tweaked.
 local function refreshRelay()
-    relay = peripheral.wrap("left")
-    if not relay or type(relay.getThroughput) ~= "function" then
-        relay = nil
-        return false, "Coloca el Relay electrico a la izquierda"
+    relay, relayName = nil, nil
+    local requested = tostring(cfg.relay_name or "auto")
+    if requested ~= "auto" then
+        local p = peripheral.wrap(requested)
+        if p and type(p.getThroughput) == "function" then
+            relay, relayName = p, requested
+            return true
+        end
+        return false, "No se encuentra " .. requested
+    end
+
+    local found = 0
+    for _, name in ipairs(peripheral.getNames()) do
+        local p = peripheral.wrap(name)
+        if p and type(p.getThroughput) == "function" then
+            found = found + 1
+            relay, relayName = p, name
+        end
+    end
+    if found == 0 then return false, "No hay Relay electrico" end
+    if found > 1 then
+        relay, relayName = nil, nil
+        return false, "Varios Relay: configura nombre"
     end
     return true
 end
 
 local function readRelay()
-    if not relay or not peripheral.isPresent("left") then
-        return nil, "RELAY IZQUIERDO DESCONECTADO"
+    if not relay or not relayName or not peripheral.isPresent(relayName) then
+        return nil, "RELAY DESCONECTADO"
     end
     local ok, value = pcall(relay.getThroughput)
     if not ok or type(value) ~= "number" or value < 0 or value ~= value or value == math.huge then
-        return nil, "LECTURA DE RELE INVALIDA"
+        return nil, "LECTURA RELAY INVALIDA"
     end
     return value
 end
 
-local function loadLedger()
-    ledger = {total_fe = 0, sessions = 0}
+local function diagnosticRelay()
+    refreshRelay()
+    clear() -- Funcion de la interfaz original.
+    print("DIAGNOSTICO RELE ELECTRICO")
+    print("--------------------------")
+    print("Perifericos con getThroughput:")
+    for _, name in ipairs(peripheral.getNames()) do
+        local p = peripheral.wrap(name)
+        if p and type(p.getThroughput) == "function" then
+            local ok, v = pcall(p.getThroughput)
+            print(name .. ": " .. (ok and tostring(v) or "ERROR") .. " FE")
+        end
+    end
+    print("")
+    print("Configurado: " .. tostring(cfg.relay_name))
+    print("Pulsa una tecla...")
+    os.pullEvent("key")
+end
+
+
+
+local function refreshInventories()
+    payment = peripheral.wrap(cfg.payment_side)
+    storage = peripheral.wrap(cfg.storage_side)
+
+    paymentName = payment and peripheral.getName(payment) or nil
+    storageName = storage and peripheral.getName(storage) or nil
+
+    if payment and
+       (type(payment.list) ~= "function" or
+        type(payment.pushItems) ~= "function") then
+        payment, paymentName = nil, nil
+    end
+
+    if storage and
+       (type(storage.list) ~= "function" or
+        type(storage.pushItems) ~= "function") then
+        storage, storageName = nil, nil
+    end
+end
+
+-- ============================================================
+-- MONEDAS MIXTAS + LIBRO DE SESION SEGURO
+-- ============================================================
+-- 1 Netherite Coin = 10 Diamond Coins de VALOR (NO se fabrican monedas).
+local denominations = {
+    diamond = {id=DIAMOND_COIN_ID, value=1},
+    netherite = {id=NETHERITE_COIN_ID, value=NETHERITE_VALUE},
+}
+local function normalizeItemID(value)
+    if type(value) ~= "string" then return "" end
+    return value:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+end
+local function itemDenom(item)
+    if type(item) ~= "table" then return nil end
+    local id = normalizeItemID(item.name)
+    for key, data in pairs(denominations) do
+        if id == data.id then return key end
+    end
+end
+local function countCurrency(inv)
+    local counts = {diamond=0,netherite=0}
+    if not inv then return counts end
+    local ok, items = pcall(inv.list)
+    if not ok or type(items) ~= "table" then return counts end
+    for _, item in pairs(items) do
+        local key = itemDenom(item)
+        if key then counts[key] = counts[key] + math.floor(item.count or 0) end
+    end
+    return counts
+end
+local function valueOf(c)
+    return (c.diamond or 0) + NETHERITE_VALUE*(c.netherite or 0)
+end
+local function countInvalidItems()
+    if not payment then return 0 end
+    local ok, items = pcall(payment.list)
+    if not ok then return 0 end
+    local total = 0
+    for _, item in pairs(items) do
+        if not itemDenom(item) then total = total + (item.count or 0) end
+    end
+    return total
+end
+local function moveDenom(source, destinationName, key, amount)
+    local moved=0
+    if not source or not destinationName or amount<=0 then return 0 end
+    local ok, items = pcall(source.list)
+    if not ok then return 0 end
+    for slot, item in pairs(items) do
+        if itemDenom(item) == key then
+            local wanted = math.min(item.count, amount-moved)
+            local success, actual = pcall(source.pushItems, destinationName, slot, wanted)
+            if not success then break end
+            moved = moved + (actual or 0)
+            if moved>=amount then break end
+        end
+    end
+    return moved
+end
+
+local closeValve, drawMain
+local ledger = {
+    pending=0, spent=0, total_fe=0, total_paid=0,
+    diamond_in=0, netherite_in=0,
+    active=false, claim_required=false, mode="", session_pin="",
+    start_ms=0, served=0, reason="", price_coins=3, price_fe=10,
+}
+local function saveLedger()
+    -- Copia anterior para poder recuperar el registro si falla un guardado.
+    local file=LEDGER_FILE..".new"
+    local f=fs.open(file,"w")
+    if not f then error("No se pudo guardar el registro") end
+    f.write(textutils.serialize(ledger))
+    f.close()
     if fs.exists(LEDGER_FILE) then
-        local f = fs.open(LEDGER_FILE, "r")
-        if f then
-            local ok, data = pcall(textutils.unserialize, f.readAll())
-            f.close()
-            if ok and type(data) == "table" and type(data.total_fe) == "number"
-                and data.total_fe >= 0 and data.total_fe < math.huge then
-                ledger.total_fe = data.total_fe
-                ledger.sessions = math.max(0, math.floor(tonumber(data.sessions) or 0))
+        if fs.exists(LEDGER_FILE..".bak") then fs.delete(LEDGER_FILE..".bak") end
+        fs.move(LEDGER_FILE,LEDGER_FILE..".bak")
+    end
+    fs.move(file,LEDGER_FILE)
+end
+local function loadLedger()
+    for _,name in ipairs({LEDGER_FILE,LEDGER_FILE..".bak"}) do
+        if fs.exists(name) then
+            local f=fs.open(name,"r")
+            if f then
+                local ok, data=pcall(textutils.unserialize,f.readAll())
+                f.close()
+                if ok and type(data)=="table" then
+                    for k,v in pairs(ledger) do
+                        if type(v)==type(data[k]) then ledger[k]=data[k] end
+                    end
+                    return
+                end
             end
         end
     end
 end
-
-local function saveLedger()
-    -- Primero escribimos un archivo temporal para no truncar el registro antiguo.
-    local temp = LEDGER_FILE .. ".tmp"
-    local f = fs.open(temp, "w")
-    if not f then error("No se pudo guardar contador") end
-    f.write(textutils.serialize(ledger))
-    f.close()
-    if fs.exists(LEDGER_FILE) then fs.delete(LEDGER_FILE) end
-    fs.move(temp, LEDGER_FILE)
+local function costFor(fe)
+    if fe <= 0 then return 0 end
+    return math.ceil(fe/ledger.price_fe - 1e-9)*ledger.price_coins
 end
-
-local function diagnosticRelay()
-    clear()
-    print("DIAGNOSTICO RELE IZQUIERDO")
-    print("--------------------------")
-    local found, reason = refreshRelay()
-    print("Lado: left")
-    if not found then
-        print(reason)
-    else
-        local value, err = readRelay()
-        if value then
-            print("getThroughput(): " .. tostring(value))
-            print("Lectura de flujo FE (sin calibrar)")
-        else
-            print(tostring(err))
-        end
-        if type(relay.isPowered) == "function" then
-            local ok, state = pcall(relay.isPowered)
-            if ok then print("isPowered(): " .. tostring(state)) end
+local function creditEnough(v)
+    return v >= cfg.coins_per_block
+end
+local function startBlockedByChange(amounts)
+    if (amounts.netherite or 0)<=0 then return false end
+    -- No hay conversor fisico de monedas. Garantizar hasta 9 DC para
+    -- devolver las fracciones de una Netherite Coin.
+    local stock=countCurrency(storage)
+    return stock.diamond + amounts.diamond < 9
+end
+local function addPaymentFunds(amounts)
+    -- Cada movimiento confirmado se registra; ante error se detiene el servicio.
+    local moved={diamond=0,netherite=0}
+    for _,key in ipairs({"diamond","netherite"}) do
+        if (amounts[key] or 0)>0 then
+            moved[key]=moveDenom(payment,storageName,key,amounts[key])
+            if moved[key]>0 then
+                ledger.pending=ledger.pending+moved[key]*denominations[key].value
+                if key=="diamond" then ledger.diamond_in=ledger.diamond_in+moved[key]
+                else ledger.netherite_in=ledger.netherite_in+moved[key] end
+                saveLedger()
+            end
+            if moved[key]~=amounts[key] then return false, moved end
         end
     end
-    print("")
-    print("Pulsa una tecla...")
-    os.pullEvent("key")
+    return true,moved
+end
+local function refundExact(change)
+    refreshInventories()
+    if not payment or not storage then return 0,"FALTA INVENTARIO" end
+    local stock=countCurrency(storage)
+    local n=math.min(math.floor(change/NETHERITE_VALUE),stock.netherite)
+    while n>=0 and (change-NETHERITE_VALUE*n)>stock.diamond do n=n-1 end
+    if n<0 then return 0,"FALTAN DIAMOND COINS DE CAMBIO" end
+    local d=change-NETHERITE_VALUE*n
+    local valueMoved=0
+    for _,entry in ipairs({{"netherite",n},{"diamond",d}}) do
+        local key,quantity=entry[1],entry[2]
+        if quantity>0 then
+            local m=moveDenom(storage,paymentName,key,quantity)
+            local v=m*denominations[key].value
+            valueMoved=valueMoved+v
+            ledger.pending=math.max(ledger.spent,ledger.pending-v)
+            saveLedger()
+            if m~=quantity then return valueMoved,"BARRIL LLENO O CAMBIO INSUFICIENTE" end
+        end
+    end
+    return valueMoved,nil
+end
+local function resetSession()
+    ledger.pending,ledger.spent=0,0
+    ledger.diamond_in,ledger.netherite_in=0,0
+    ledger.active,ledger.claim_required=false,false
+    ledger.mode,ledger.session_pin,ledger.reason="","",""
+    ledger.start_ms,ledger.served=0,0
+    saveLedger()
+end
+local function settleSession(reason)
+    closeValve()
+    ledger.active=false
+    ledger.reason=reason
+    saveLedger()
+    local due=math.max(0,ledger.pending-ledger.spent)
+    while due>0 do
+        local returned,why=refundExact(due)
+        due=math.max(0,ledger.pending-ledger.spent)
+        if due>0 then
+            -- Una sesion segura NO expone el cambio por si sola:
+            -- esta funcion solo se invoca despues del PIN o autorizacion admin.
+            drawMain({status="CAMBIO PENDIENTE",credit=ledger.pending,
+                cost=ledger.spent,served=ledger.served,mode=ledger.mode,
+                message=tostring(why or "Libera espacio en el barril derecho")})
+            sleep(cfg.change_retry_time)
+        end
+    end
+    ledger.total_fe=ledger.total_fe+ledger.served
+    ledger.total_paid=ledger.total_paid+ledger.spent
+    local cost=ledger.spent
+    local served=ledger.served
+    resetSession() -- El PIN se borra SOLO aqui, una vez atendido el cambio.
+    return cost,served
+end
+local function freezeProtected(reason)
+    closeValve()
+    ledger.active=false
+    ledger.claim_required=true
+    ledger.reason=reason
+    saveLedger()
+end
+
+-- En una parada automatica de 24h el saldo sobrante se bloquea.
+-- No se devuelve al barril hasta que el propietario introduce su PIN.
+local function finishSession(reason, authorized)
+    closeValve()
+    ledger.active=false
+    ledger.reason=reason
+    saveLedger()
+    if ledger.mode=="24horas" and not authorized
+            and ledger.pending>ledger.spent then
+        freezeProtected(reason)
+        return false,ledger.spent,ledger.served
+    end
+    local paid,fe=settleSession(reason)
+    return true,paid,fe
 end
 
 
@@ -257,7 +513,7 @@ local function openValve()
     end
 end
 
-local function closeValve()
+closeValve = function()
     if cfg.control_mode == "pulso" then
         pulse(cfg.close_side)
     else
@@ -270,10 +526,10 @@ end
 -- INTERFAZ
 -- ============================================================
 
-local function drawButton(running, enabled)
+local function drawButton(running, enabled, locked)
     local w, h = term.getSize()
 
-    local label = running and " [ F ]  PARAR " or " [ F ]  COMENZAR "
+    local label = locked and " [ F ]  RECLAMAR " or (running and " [ F ]  PARAR " or " [ F ]  COMENZAR ")
     local x = math.floor((w - #label) / 2) + 1
     local y = h - 1
 
@@ -318,8 +574,9 @@ local function drawOutOfService()
     centerText(math.floor(h / 2) + 1, "Disculpe las molestias")
 end
 
-local function drawMain(state)
+drawMain = function(state)
     state = state or {}
+
     if cfg.out_of_service then
         drawOutOfService()
         return
@@ -327,56 +584,69 @@ local function drawMain(state)
 
     local w, h = term.getSize()
     clear()
+
     if hasColor() then
         fillLine(1, colors.blue)
         centerText(1, cfg.station_name, colors.white, colors.blue)
     else
         centerText(1, cfg.station_name)
     end
+
     centerText(2, cleanID(cfg.station_id) .. " | " .. cleanID(cfg.group_id))
 
     local status = state.status or "ESPERANDO"
     local statusColor = colors.white
+
     if hasColor() then
         if state.running then
             statusColor = colors.lime
-        elseif status:find("ERROR") then
+        elseif status:find("ERROR") or status:find("OCUPADO") then
             statusColor = colors.red
         elseif status == "LISTO" then
             statusColor = colors.yellow
         end
     end
+
     centerText(3, status, statusColor)
 
+    local credit = state.credit or 0
     local served = state.served or 0
-    local cost = math.ceil(served / cfg.fe_per_token)
-    local totalCost = math.ceil(ledger.total_fe / cfg.fe_per_token)
-    writeAt(2, 5, "SESIONES")
-    writeAt(16, 5, tostring(ledger.sessions), colors.yellow)
+    local cost = state.cost or 0
+    local remaining = math.max(0, credit - cost)
+
+    writeAt(2, 5, "CREDITO")
+    writeAt(16, 5, tostring(credit) .. " DC", colors.yellow)
+
     writeAt(2, 6, "SUMINISTRADO")
     writeAt(16, 6, tostring(math.floor(served)) .. " FE", colors.cyan)
+
     writeAt(2, 7, "COSTE")
-    writeAt(16, 7, tostring(cost) .. " FT", colors.orange)
-    writeAt(2, 8, "TOTAL")
-    writeAt(16, 8, tostring(totalCost) .. " FT", colors.lime)
+    writeAt(16, 7, tostring(cost) .. " DC", colors.orange)
+
+    writeAt(2, 8, "RESTANTE")
+    writeAt(16, 8, tostring(remaining) .. " DC", colors.lime)
 
     if state.throughput ~= nil then
         writeAt(2, 10, "MEDIDOR " .. cleanID(cfg.meter_id))
-        writeAt(16, 10, tostring(math.floor(state.throughput)) .. " FE*")
+        writeAt(16, 10, tostring(math.floor(state.throughput)) .. " FE/t")
     end
+
     writeAt(2, 12, "PRECIO")
-    writeAt(10, 12, "1 FT = " .. tostring(cfg.fe_per_token) .. " FE")
+    writeAt(10, 12, tostring(cfg.coins_per_block) .. " DC = " .. tostring(cfg.fe_per_block) .. " FE")
+    writeAt(2, 13, "MODO: " .. (state.mode or cfg.mode) .. " [M]", colors.yellow)
+
     if state.message then
         local msg = tostring(state.message)
         local maxLen = math.max(1, w - 4)
+
         writeAt(2, h - 4, msg:sub(1, maxLen))
         if #msg > maxLen then
             writeAt(2, h - 3, msg:sub(maxLen + 1, maxLen * 2))
         end
     end
-    drawButton(state.running == true, state.enabled ~= false)
-end
 
+    drawButton(state.running == true, credit > 0, state.locked == true)
+end
 
 -- ============================================================
 -- ADMIN
@@ -427,19 +697,79 @@ local function promptSide(title, current)
     return current
 end
 
--- Ya no hay barril de pago ni inventario de monedas.
-local function resetLedger()
+local function diagnosticCoins()
+    refreshInventories()
     clear()
-    centerText(2, "REINICIAR CONTADOR")
-    print("")
-    print("Pone total FE y sesiones a 0.")
-    print("Escribe REINICIAR para confirmar")
-    write("> ")
-    if read() == "REINICIAR" then
-        ledger = {total_fe=0, sessions=0}
-        saveLedger()
+    print("DIAGNOSTICO MONEDAS")
+    print("-------------------")
+    if not payment then print("No encuentro barril pago")
+    else
+        local c=countCurrency(payment)
+        print("Diamond Coins: "..c.diamond)
+        print("Netherite Coins: "..c.netherite)
+        print("Valor: "..valueOf(c).." DC")
+        print("Objetos invalidos: "..countInvalidItems())
     end
+    print("")
+    print("Pulsa una tecla...")
+    os.pullEvent("key")
 end
+local function promptPIN(title)
+    clear()
+    centerText(2,title)
+    centerText(4,"PIN numerico: 4-8 cifras")
+    term.setCursorPos(2,6)
+    write("PIN: ")
+    local pin=read("*")
+    if type(pin)~="string" then return nil end
+    if #pin<4 or #pin>8 or not pin:match("^%d+$") then return nil end
+    return pin
+end
+local function createSessionPIN()
+    local p=promptPIN("NUEVA SESION 24 HORAS")
+    if not p then
+        clear() centerText(5,"PIN INVALIDO",colors.red) sleep(1.5)
+        return nil
+    end
+    clear()
+    centerText(2,"CONFIRMAR PIN")
+    term.setCursorPos(2,6) write("Repite el PIN: ")
+    if read("*")~=p then
+        clear() centerText(5,"NO COINCIDE",colors.red) sleep(1.5)
+        return nil
+    end
+    return p
+end
+local function checkSessionPIN(title)
+    local p=promptPIN(title)
+    if not p or p~=ledger.session_pin then
+        clear() centerText(5,"PIN INCORRECTO",colors.red) sleep(1.5)
+        return false
+    end
+    return true
+end
+local function changeAdminPIN()
+    local pin=promptPIN("NUEVO PIN ADMIN")
+    if not pin then return end
+    clear() centerText(2,"CONFIRMAR PIN ADMIN")
+    term.setCursorPos(2,6) write("Repite PIN: ")
+    if read("*")==pin then cfg.admin_pin=pin
+    else clear() centerText(5,"NO COINCIDE",colors.red) sleep(1.5) end
+end
+local function adminCancelSession()
+    if ledger.session_pin=="" and ledger.pending<=0 then
+        clear() print("No hay sesion activa") sleep(1.5)
+        return
+    end
+    clear()
+    centerText(2,"CANCELACION ADMIN")
+    print("") print("Se cortara el suministro y")
+    print("se intentara devolver el saldo.")
+    print("Escribe CANCELAR para continuar:")
+    write("> ")
+    if read()=="CANCELAR" then adminCancelRequested=true end
+end
+
 
 
 local function adminOptions()
@@ -488,10 +818,45 @@ local function adminOptions()
         },
 
         {
-            label="FE por FuelToken",
-            value=function() return cfg.fe_per_token end,
+            label="Monedas por bloque",
+            value=function() return cfg.coins_per_block end,
             edit=function()
-                cfg.fe_per_token = promptNumber("FE por FuelToken", cfg.fe_per_token, 1)
+                cfg.coins_per_block = math.floor(promptNumber("Diamond Coins por bloque", cfg.coins_per_block, 1))
+            end
+        },
+        {
+            label="FE por bloque",
+            value=function() return cfg.fe_per_block end,
+            edit=function()
+                cfg.fe_per_block = promptNumber("FE por bloque", cfg.fe_per_block, 0.001)
+            end
+        },
+        {
+            label="Tipo de carga",
+            value=function() return cfg.mode end,
+            edit=function()
+                cfg.mode = cfg.mode == "24horas" and "repostada" or "24horas"
+            end
+        },
+        {
+            label="Duracion de 24h",
+            value=function() return "24 horas fijas" end,
+            edit=function() end
+        },
+
+        {
+            label="Barril pago",
+            value=function() return cfg.payment_side end,
+            edit=function()
+                cfg.payment_side = promptSide("Barril pago", cfg.payment_side)
+            end
+        },
+
+        {
+            label="Barril almacen",
+            value=function() return cfg.storage_side end,
+            edit=function()
+                cfg.storage_side = promptSide("Barril almacen", cfg.storage_side)
             end
         },
 
@@ -528,12 +893,17 @@ local function adminOptions()
         },
 
         {
-            label="Lecturas sin flujo",
-            value=function() return cfg.no_flow_limit end,
+            label="Segundos sin energia",
+            value=function() return cfg.no_flow_seconds end,
             edit=function()
-                cfg.no_flow_limit = math.floor(
-                    promptNumber("Lecturas sin flujo", cfg.no_flow_limit, 0)
-                )
+                cfg.no_flow_seconds = promptNumber("Sin flujo parar a los (s)", cfg.no_flow_seconds, 0.5)
+            end
+        },
+        {
+            label="Factor ticks/seg",
+            value=function() return cfg.ticks_per_second end,
+            edit=function()
+                cfg.ticks_per_second = promptNumber("Calibracion FE por tick", cfg.ticks_per_second, 0.1)
             end
         },
 
@@ -562,9 +932,12 @@ local function adminOptions()
         },
 
         {
-            label="Lado medidor",
-            value=function() return "left (fijo)" end,
-            edit=diagnosticRelay
+            label="Nombre Relay",
+            value=function() return cfg.relay_name end,
+            edit=function()
+                cfg.relay_name = promptText("NOMBRE RELAY O auto", cfg.relay_name)
+                refreshRelay()
+            end
         },
 
         {
@@ -577,11 +950,23 @@ local function adminOptions()
         },
 
         {
-            label="Factor ticks/s",
-            value=function() return cfg.ticks_per_second end,
+            label="Cambiar PIN admin",
+            value=function() return "CAMBIAR" end,
+            edit=changeAdminPIN
+        },
+        {
+            label="PIN sesion 24h",
+            value=function() return ledger.session_pin ~= "" and ledger.session_pin or "NINGUNO" end,
             edit=function()
-                cfg.ticks_per_second = promptNumber("Factor estimado ticks/s", cfg.ticks_per_second, 1)
+                clear() centerText(2,"PIN SESION ACTIVA")
+                centerText(5,ledger.session_pin ~= "" and ledger.session_pin or "NINGUNO",colors.yellow)
+                centerText(8,"Pulsa una tecla...") os.pullEvent("key")
             end
+        },
+        {
+            label="Cancelar sesion",
+            value=function() return (ledger.active or ledger.claim_required or ledger.pending>0) and "CANCELAR" or "NINGUNA" end,
+            edit=adminCancelSession
         },
 
         {
@@ -591,9 +976,9 @@ local function adminOptions()
         },
 
         {
-            label="Reiniciar contador",
-            value=function() return "CONFIRMAR" end,
-            edit=resetLedger
+            label="Diagnostico monedas",
+            value=function() return "ABRIR" end,
+            edit=diagnosticCoins
         },
 
         {
@@ -663,7 +1048,7 @@ local function adminMenu()
     term.setCursorPos(2, 6)
     write("PIN: ")
 
-    if read("*") ~= ADMIN_PIN then
+    if read("*") ~= cfg.admin_pin then
         clear()
         centerText(5, "CODIGO INCORRECTO", colors.red)
         sleep(1.5)
@@ -699,7 +1084,8 @@ local function adminMenu()
 
                 if option.exit then
                     saveConfig()
-                    return
+                    refreshInventories()
+                        return
                 end
 
                 if option.edit then
@@ -709,6 +1095,7 @@ local function adminMenu()
 
             elseif a == keys.backspace then
                 saveConfig()
+                refreshInventories()
                 return
             end
 
@@ -731,162 +1118,318 @@ local function adminMenu()
 end
 
 -- ============================================================
--- SUMINISTRO + CONTADOR IZQUIERDO
+-- RELE / SESION PROTEGIDA
 -- ============================================================
-local function isStopInput(event, a, b, c)
-    if event == "key" and a == keys.f then return true end
-    if event == "mouse_click" and buttonClicked(b, c) then return true end
-    return false
+local function isStopInput(event,a,b,c)
+    return (event=="key" and a==keys.f)
+        or (event=="mouse_click" and buttonClicked(b,c))
 end
-
-local function waitForSampleOrStop()
-    local timer = os.startTimer(cfg.sample_time)
+local function waitAction()
+    local timer=os.startTimer(cfg.sample_time)
     while true do
-        local event, a, b, c = os.pullEvent()
-        if event == "timer" and a == timer then return "sample" end
-        if isStopInput(event, a, b, c) then return "stop" end
+        local event,a,b,c=os.pullEvent()
+        if event=="timer" and a==timer then return "sample" end
+        if isStopInput(event,a,b,c) then return "stop" end
+        if event=="key" and a==keys.c then return "admin" end
     end
 end
-
-local function supplyElectricity()
-    if cfg.out_of_service then
-        closeValve()
-        return
-    end
-    closeValve()
-    local found, err = refreshRelay()
+local function sessionScreen(message,active,flow)
+    drawMain({status=active and "SUMINISTRANDO" or (ledger.reason~="" and ledger.reason or "PAUSADA"),
+        credit=ledger.pending,served=ledger.served,cost=ledger.spent,
+        throughput=flow or 0,mode=ledger.mode,running=active,
+        locked=ledger.claim_required,
+        message=message})
+end
+local function runSession()
+    local found,err=refreshRelay()
     if not found then
-        drawMain({status="ERROR RELAY", enabled=false, message=tostring(err)})
-        sleep(2)
+        if ledger.mode=="24horas" then freezeProtected("ERROR RELAY")
+        else settleSession("ERROR RELAY") end
         return
     end
-    local initial, readError = readRelay()
-    if initial == nil then
-        drawMain({status="ERROR RELAY", enabled=false, message=tostring(readError)})
-        sleep(2)
+    local v,why=readRelay()
+    if v==nil then
+        if ledger.mode=="24horas" then freezeProtected(tostring(why))
+        else settleSession("ERROR RELAY") end
         return
     end
-
-    local served, flow, noFlow = 0, initial, 0
-    local startedAt = os.epoch("utc")
-    local lastAt, lastSave = startedAt, startedAt
-    local reason = "FINALIZADO"
-    ledger.sessions = ledger.sessions + 1
+    if ledger.pending-ledger.spent < ledger.price_coins then
+        finishSession("SIN CREDITO",false)
+        return
+    end
+    local now=os.epoch("utc")
+    if ledger.mode=="24horas" and now-ledger.start_ms >= cfg.max_hours*3600000 then
+        finishSession("24 HORAS COMPLETADAS",false)
+        return
+    end
+    ledger.active=true
+    ledger.claim_required=false
+    ledger.reason=""
     saveLedger()
-    drawMain({status="SUMINISTRANDO", served=0, throughput=flow,
-        running=true, message="F o boton para detener."})
+    local lastAt=now
+    local zeroSince=now
+    local lastSave=now
+    local elapsedSinceStart=now
     openValve()
-
+    local reason=nil
+    local authorized=false
+    local rate=0
     while true do
-        local action = waitForSampleOrStop()
-        local now = os.epoch("utc")
-        local reading, errorMsg = readRelay()
-        if reading == nil then
-            reason = "ERROR RELAY"
+        local action=waitAction()
+        now=os.epoch("utc")
+        local sample,readError=readRelay()
+        if sample==nil then
+            reason="ERROR RELAY"
             break
         end
-        flow = reading
-        -- La documentacion dice 'throughput actual en FE', no contador total.
-        -- HIPOTESIS DE CALCULO: lectura aproximadamente por tick.
-        -- Es una estimacion; calibrar el factor en tu version del mod.
-        local deltaSeconds = math.max(0, (now - lastAt) / 1000)
-        deltaSeconds = math.min(deltaSeconds, math.max(0.25, cfg.sample_time * 2))
-        lastAt = now
-        if flow > cfg.flow_epsilon_fe then
-            local fe = flow * deltaSeconds * cfg.ticks_per_second
-            served = served + fe
-            ledger.total_fe = ledger.total_fe + fe
-            noFlow = 0
-        elseif (now - startedAt) / 1000 >= cfg.flow_grace_time then
-            noFlow = noFlow + 1
+        rate=sample
+        local elapsed=math.max(0,(now-lastAt)/1000)
+        local ticks=math.min(elapsed,(cfg.sample_time*2+0.2))*cfg.ticks_per_second
+        lastAt=now
+        if sample>cfg.flow_epsilon_fe then
+            ledger.served=ledger.served+sample*ticks
+            zeroSince=now
+        elseif now-elapsedSinceStart>=cfg.flow_grace_time*1000
+               and now-zeroSince>=cfg.no_flow_seconds*1000 then
+            reason="SIN ENERGIA / SIN CONSUMO"
         end
-        if now - lastSave >= 2000 then
-            saveLedger()
-            lastSave = now
-        end
-        drawMain({status="SUMINISTRANDO", served=served, throughput=flow,
-            running=true, message="F o boton para detener."})
-        if action == "stop" then
-            reason = "PARADO"
-            break
-        end
-        if cfg.no_flow_limit > 0 and noFlow >= cfg.no_flow_limit then
-            reason = "SIN CONSUMO"
-            break
-        end
-    end
-    closeValve()
-    saveLedger()
-    drawMain({status=reason, served=served, throughput=flow,
-        running=false, message="Coste estimado; sin cobro automatico."})
-    sleep(3)
-end
+        local previousSpent=ledger.spent
+        ledger.spent=math.min(ledger.pending,costFor(ledger.served))
 
-
--- ESPERA / MAIN
--- ============================================================
-
-local function waitIdleAction()
-    local timer = os.startTimer(0.35)
-
-    while true do
-        local event, a, b, c = os.pullEvent()
-
-        if event == "key" then
-            if a == keys.f then
-                return "start"
-            elseif a == keys.c then
-                return "admin"
-            end
-        end
-
-        if event == "mouse_click" and buttonClicked(b, c) then
-            return "start"
-        end
-
-        if event == "timer" and a == timer then
-            return "refresh"
-        end
-    end
-end
-
-local function main()
-    loadConfig()
-    loadLedger()
-    closeValve()  -- cortado al arrancar
-    refreshRelay()
-    while true do
-        if cfg.out_of_service then
-            closeValve()
-            drawOutOfService()
-        else
-            local found, problem = refreshRelay()
-            if not found then
-                closeValve()
-                drawMain({status="ERROR RELAY", enabled=false,
-                    message=tostring(problem)})
+        -- Puede recargar durante las 24 horas. Primero verificamos cambio.
+        if ledger.mode=="24horas" and not reason then
+            refreshInventories()
+            if not payment or not storage then reason="ERROR INVENTARIO"
             else
-                local rate, readErr = readRelay()
-                if rate == nil then
-                    closeValve()
-                    drawMain({status="ERROR RELAY", enabled=false,
-                        message=tostring(readErr)})
-                else
-                    drawMain({status="LISTO", throughput=rate, served=0,
-                        message="Medidor izquierdo | F o boton."})
+                local topup=countCurrency(payment)
+                if valueOf(topup)>0 and not startBlockedByChange(topup) then
+                    local ok=addPaymentFunds(topup)
+                    if not ok then reason="ERROR RECARGA" end
                 end
             end
         end
-        local action = waitIdleAction()
-        if action == "admin" then
+
+        -- Persistir siempre que cambie la parte cobrada y al menos cada 1s.
+        if now-lastSave>=1000 or ledger.spent~=previousSpent or action~="sample" or reason then
+            saveLedger()
+            lastSave=now
+        end
+        if ledger.mode=="24horas" and now-ledger.start_ms>=cfg.max_hours*3600000 then
+            reason="24 HORAS COMPLETADAS"
+        end
+        if ledger.pending-ledger.spent<ledger.price_coins then
+            reason="CREDITO AGOTADO"
+        end
+        if reason then break end
+
+        sessionScreen(ledger.mode=="24horas"
+            and "F: PIN para parar | C: admin" or "F: parar",true,rate)
+
+        if action=="stop" then
             closeValve()
+            saveLedger()
+            if ledger.mode=="24horas" then
+                if checkSessionPIN("PARAR SESION 24H") then
+                    reason="PARADO CON PIN"
+                    authorized=true
+                    break
+                end
+            else
+                reason="PARADO"
+                authorized=true
+                break
+            end
+            -- PIN incorrecto: NO cancelar, sin suministro durante el dialogo.
+            lastAt=os.epoch("utc")
+            zeroSince=lastAt
+            elapsedSinceStart=lastAt
+            openValve()
+        elseif action=="admin" then
+            closeValve()
+            saveLedger()
             adminMenu()
-        elseif action == "start" and not cfg.out_of_service then
-            supplyElectricity()
+            if adminCancelRequested then
+                reason="CANCELACION ADMIN"
+                authorized=true
+                adminCancelRequested=false
+                break
+            end
+            if cfg.out_of_service then
+                reason="FUERA DE SERVICIO"
+                break
+            end
+            -- No facturar el tiempo detenido mientras se usa el menu.
+            lastAt=os.epoch("utc")
+            zeroSince=lastAt
+            elapsedSinceStart=lastAt
+            openValve()
+        end
+    end
+    closeValve()
+    -- Conservamos los datos del coste y saldo antes de devolver cambio.
+    ledger.spent=math.min(ledger.pending,costFor(ledger.served))
+    saveLedger()
+    local credit,cost,served=ledger.pending,ledger.spent,ledger.served
+    local done=finishSession(reason or "FINALIZADO",authorized)
+    if not done then
+        sessionScreen("SALDO PROTEGIDO: F + PIN | R: REANUDAR",false,rate)
+    else
+        drawMain({status=reason or "FINALIZADO", credit=credit,served=served,
+            cost=cost, throughput=rate, mode=cfg.mode,
+            message="Cobrado: "..cost.." DC. Cambio: "..(credit-cost).." DC"})
+        sleep(2.5)
+    end
+end
+local function beginSession()
+    closeValve()
+    if cfg.out_of_service or ledger.pending>0 or ledger.claim_required then return end
+    local ok,err=refreshRelay()
+    if not ok then drawMain({status="ERROR RELAY",message=tostring(err)}) sleep(2) return end
+    local v,e=readRelay()
+    if v==nil then drawMain({status="ERROR RELAY",message=tostring(e)}) sleep(2) return end
+    refreshInventories()
+    if not payment or not storage then return end
+    local amounts=countCurrency(payment)
+    local value=valueOf(amounts)
+    if not creditEnough(value) then
+        drawMain({status="SIN CREDITO",message="Introduce al menos "..cfg.coins_per_block.." DC"})
+        sleep(1.5)
+        return
+    end
+    if startBlockedByChange(amounts) then
+        drawMain({status="SIN CAMBIO",message="Repon 9 Diamond Coins en la caja"})
+        sleep(2)
+        return
+    end
+    local pin=""
+    if cfg.mode=="24horas" then
+        pin=createSessionPIN()
+        if not pin then return end
+    end
+    ledger.mode=cfg.mode
+    ledger.start_ms=os.epoch("utc")
+    ledger.price_coins=cfg.coins_per_block
+    ledger.price_fe=cfg.fe_per_block
+    ledger.session_pin=pin
+    ledger.pending,ledger.spent,ledger.served=0,0,0
+    ledger.diamond_in,ledger.netherite_in=0,0
+    ledger.active=false
+    ledger.claim_required=false
+    ledger.reason=""
+    saveLedger()
+    local moved,detail=addPaymentFunds(amounts)
+    if not moved then
+        if ledger.pending>0 then
+            freezeProtected("ERROR PAGO / REVISAR")
+            if ledger.mode~="24horas" then settleSession("ERROR PAGO") end
+        else
+            resetSession()
+        end
+        drawMain({status="ERROR PAGO",message="No se movieron todas las monedas"})
+        sleep(2)
+        return
+    end
+    runSession()
+end
+local function claimOrResume(resume)
+    if not ledger.claim_required or ledger.mode~="24horas" then return end
+    if not checkSessionPIN(resume and "REANUDAR SESION" or "FINALIZAR SESION") then return end
+    if resume then
+        if ledger.pending-ledger.spent < ledger.price_coins then
+            drawMain({status="SIN CREDITO",message="Primero finaliza y reclama tu saldo"})
+            sleep(2) return
+        end
+        if os.epoch("utc")-ledger.start_ms>=cfg.max_hours*3600000 then
+            drawMain({status="24H COMPLETADAS",message="Solo puedes reclamar el cambio"})
+            sleep(2) return
+        end
+        runSession()
+    else
+        local paid,fe=settleSession("PARADO CON PIN")
+        drawMain({status="FINALIZADO", cost=paid,served=fe,
+            message="Cambio entregado. PIN eliminado."})
+        sleep(2)
+    end
+end
+local function waitIdleAction()
+    local timer=os.startTimer(0.35)
+    while true do
+        local event,a,b,c=os.pullEvent()
+        if event=="key" then
+            if a==keys.f then return "start"
+            elseif a==keys.c then return "admin"
+            elseif a==keys.m then return "mode"
+            elseif a==keys.r then return "resume" end
+        end
+        if event=="mouse_click" and buttonClicked(b,c) then return "start" end
+        if event=="timer" and a==timer then return "refresh" end
+    end
+end
+local function main()
+    loadConfig()
+    closeValve()
+    loadLedger()
+    -- Un reinicio no libera el dinero de la sesion 24h a cualquier persona.
+    if ledger.active or (ledger.mode=="24horas" and ledger.pending>0
+            and ledger.session_pin~="") then
+        ledger.active=false
+        ledger.claim_required=(ledger.mode=="24horas")
+        ledger.reason="REINICIO: SESION BLOQUEADA"
+        saveLedger()
+    end
+    -- Migrar saldo antiguo sin PIN? No se cargan automaticamente los antiguos
+    -- ledgers del programa anterior: usa archivos separados para mayor seguridad.
+    refreshRelay()
+    while true do
+        refreshInventories()
+        closeValve()
+        if ledger.claim_required then
+            sessionScreen("PIN PARA RECUPERAR SALDO | F: FIN | R: SEGUIR",false,0)
+        elseif ledger.pending>0 then
+            -- Caso de reinicio en modo repostada: se intenta devolver cambio.
+            local c=settleSession("RECUPERACION")
+            drawMain({status="RECUPERACION",message="Saldo recuperado"})
+        elseif cfg.out_of_service then
+            drawOutOfService()
+        elseif not payment then
+            drawMain({status="ERROR BARRIL PAGO",message="Falta barril en "..cfg.payment_side})
+        elseif not storage then
+            drawMain({status="ERROR BARRIL ALMACEN",message="Falta inventario en "..cfg.storage_side})
+        elseif not refreshRelay() then
+            drawMain({status="ERROR RELAY",message="Conecta Redstone Relay a la izquierda"})
+        else
+            local c=countCurrency(payment)
+            local value=valueOf(c)
+            local invalid=countInvalidItems()
+            local msg
+            if startBlockedByChange(c) then msg="Para NC, pon 9 DC de cambio en caja"
+            elseif value>=cfg.coins_per_block then msg="F comenzar | M cambiar modo"
+            elseif value>0 then msg="Faltan "..(cfg.coins_per_block-value).." DC"
+            elseif invalid>0 then msg="Objeto invalido en barril pago"
+            else msg="Introduce Diamond / Netherite Coins" end
+            drawMain({status=value>=cfg.coins_per_block and "LISTO" or "ESPERANDO PAGO",
+                credit=value,served=0,cost=0,throughput=0,mode=cfg.mode,message=msg})
+        end
+        local action=waitIdleAction()
+        if action=="admin" then
+            adminMenu()
+            if adminCancelRequested then
+                adminCancelRequested=false
+                if ledger.claim_required or ledger.pending>0 then
+                    settleSession("CANCELACION ADMIN")
+                end
+            end
+        elseif ledger.claim_required then
+            if action=="start" then claimOrResume(false)
+            elseif action=="resume" then claimOrResume(true) end
+        elseif action=="mode" then
+            cfg.mode=cfg.mode=="repostada" and "24horas" or "repostada"
+            saveConfig()
+        elseif action=="start" and not cfg.out_of_service then
+            beginSession()
         end
     end
 end
-
 
 
 local ok, err = pcall(main)
