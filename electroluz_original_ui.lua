@@ -62,7 +62,7 @@ local defaults = {
     control_mode = "directo", -- directo=mantener senal; pulso=tu latch original.
 
     sample_time = 0.05,
-    no_flow_seconds = 5, -- Sin flujo, cortar en ambos modos tras 5 segundos.
+    no_flow_seconds = 5, -- Solo repostada: 24h permite consumo cero.
     flow_epsilon_fe = 0,
     flow_grace_time = 1.0,
 
@@ -390,6 +390,15 @@ end
 local function creditEnough(v)
     return v >= cfg.coins_per_block
 end
+-- El coste se redondea por bloques, pero un bloque ya abonado permite
+-- consumir TODOS sus FE. No cortar cuando se cobra el primer FE del bloque.
+local function prepaidFE()
+    if ledger.price_coins <= 0 or ledger.price_fe <= 0 then return 0 end
+    return math.floor(ledger.pending / ledger.price_coins) * ledger.price_fe
+end
+local function remainingFE()
+    return math.max(0, prepaidFE() - ledger.served)
+end
 local function startBlockedByChange(amounts)
     if (amounts.netherite or 0)<=0 then return false end
     -- No hay conversor fisico de monedas. Garantizar hasta 9 DC para
@@ -625,6 +634,10 @@ drawMain = function(state)
 
     writeAt(2, 8, "RESTANTE")
     writeAt(16, 8, tostring(remaining) .. " DC", colors.lime)
+    if state.fe_remaining ~= nil then
+        writeAt(2, 9, "FE PENDIENTES")
+        writeAt(16, 9, tostring(math.floor(math.max(0,state.fe_remaining))) .. " FE",colors.lime)
+    end
 
     if state.throughput ~= nil then
         writeAt(2, 10, "MEDIDOR " .. cleanID(cfg.meter_id))
@@ -1137,7 +1150,7 @@ local function sessionScreen(message,active,flow)
     drawMain({status=active and "SUMINISTRANDO" or (ledger.reason~="" and ledger.reason or "PAUSADA"),
         credit=ledger.pending,served=ledger.served,cost=ledger.spent,
         throughput=flow or 0,mode=ledger.mode,running=active,
-        locked=ledger.claim_required,
+        locked=ledger.claim_required,fe_remaining=remainingFE(),
         message=message})
 end
 local function runSession()
@@ -1153,8 +1166,8 @@ local function runSession()
         else settleSession("ERROR RELAY") end
         return
     end
-    if ledger.pending-ledger.spent < ledger.price_coins then
-        finishSession("SIN CREDITO",false)
+    if remainingFE() <= 0 then
+        finishSession("CREDITO AGOTADO",false)
         return
     end
     local now=os.epoch("utc")
@@ -1166,11 +1179,12 @@ local function runSession()
     ledger.claim_required=false
     ledger.reason=""
     saveLedger()
-    local lastAt=now
     local zeroSince=now
     local lastSave=now
     local elapsedSinceStart=now
     openValve()
+    -- El reloj de facturacion arranca DESPUES de habilitar el suministro.
+    local lastAt=os.epoch("utc")
     local reason=nil
     local authorized=false
     local rate=0
@@ -1189,7 +1203,8 @@ local function runSession()
         if sample>cfg.flow_epsilon_fe then
             ledger.served=ledger.served+sample*ticks
             zeroSince=now
-        elseif now-elapsedSinceStart>=cfg.flow_grace_time*1000
+        elseif ledger.mode ~= "24horas"
+               and now-elapsedSinceStart>=cfg.flow_grace_time*1000
                and now-zeroSince>=cfg.no_flow_seconds*1000 then
             reason="SIN ENERGIA / SIN CONSUMO"
         end
@@ -1217,13 +1232,22 @@ local function runSession()
         if ledger.mode=="24horas" and now-ledger.start_ms>=cfg.max_hours*3600000 then
             reason="24 HORAS COMPLETADAS"
         end
-        if ledger.pending-ledger.spent<ledger.price_coins then
+        -- No agotar el credito al cobrar el PRIMER FE de un bloque de 10.
+        -- Cada bloque comprado se puede utilizar hasta completar sus 10 FE.
+        if remainingFE() <= 0 then
             reason="CREDITO AGOTADO"
         end
         if reason then break end
 
-        sessionScreen(ledger.mode=="24horas"
-            and "F: PIN para parar | C: admin" or "F: parar",true,rate)
+        local message
+        if ledger.mode == "24horas" then
+            message = rate <= cfg.flow_epsilon_fe
+                and "24H EN ESPERA | F+PIN: parar"
+                or "F: PIN para parar | C: admin"
+        else
+            message="F: parar"
+        end
+        sessionScreen(message,true,rate)
 
         if action=="stop" then
             closeValve()
@@ -1335,7 +1359,7 @@ local function claimOrResume(resume)
     if not ledger.claim_required or ledger.mode~="24horas" then return end
     if not checkSessionPIN(resume and "REANUDAR SESION" or "FINALIZAR SESION") then return end
     if resume then
-        if ledger.pending-ledger.spent < ledger.price_coins then
+        if remainingFE() <= 0 then
             drawMain({status="SIN CREDITO",message="Primero finaliza y reclama tu saldo"})
             sleep(2) return
         end
