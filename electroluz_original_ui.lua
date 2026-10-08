@@ -27,7 +27,7 @@
 -- Configurar modo DIRECTO para activacion por senal continua de redstone.
 -- ============================================================
 
-local APP_VERSION = "V5"
+local APP_VERSION = "V6"
 local CONFIG_FILE = "/electroluz_diamond.cfg"
 -- Registro de diagnostico (sin PIN, sin datos sensibles).
 local DIAG_FILE = "/electroluz_diagnostico_v4.dat"
@@ -487,12 +487,16 @@ local function showDiagnostic()
     print("Pulsa una tecla...")
     os.pullEvent("key")
 end
-local function startBlockedByChange(amounts)
-    if (amounts.netherite or 0)<=0 then return false end
-    -- No hay conversor fisico de monedas. Garantizar hasta 9 DC para
-    -- devolver las fracciones de una Netherite Coin.
+local function missingChangeReserve(amounts)
+    -- Unicamente si se aceptan Netherite Coins hay riesgo de necesitar
+    -- fraccionar su valor (1 NC = 10 DC). Reservar hasta 9 DC fisicos.
+    -- Si solamente se pagan Diamond Coins no se exige ninguna reserva extra.
+    if (amounts.netherite or 0) <= 0 then return 0 end
     local stock=countCurrency(storage)
-    return stock.diamond + amounts.diamond < 9
+    return math.max(0, 9-stock.diamond-(amounts.diamond or 0))
+end
+local function startBlockedByChange(amounts)
+    return missingChangeReserve(amounts)>0
 end
 local function addPaymentFunds(amounts)
     -- Cada movimiento confirmado se registra; ante error se detiene el servicio.
@@ -516,10 +520,13 @@ local function refundExact(change)
     if not payment or not storage then return 0,"FALTA INVENTARIO" end
     if not inventoryTransfersReady() then return 0,"INVENTARIO SIN TRANSFERENCIA" end
     local stock=countCurrency(storage)
+    -- Siempre que sea posible, devolver Netherite Coins completas primero.
+    -- Si falta una fraccion, especificar la cantidad EXACTA de DC a reponer.
     local n=math.min(math.floor(change/NETHERITE_VALUE),stock.netherite)
-    while n>=0 and (change-NETHERITE_VALUE*n)>stock.diamond do n=n-1 end
-    if n<0 then return 0,"FALTAN DIAMOND COINS DE CAMBIO" end
     local d=change-NETHERITE_VALUE*n
+    if d>stock.diamond then
+        return 0,"FALTAN "..tostring(d-stock.diamond).." DIAMOND COINS ABAJO"
+    end
     local valueMoved=0
     for _,entry in ipairs({{"netherite",n},{"diamond",d}}) do
         local key,quantity=entry[1],entry[2]
@@ -548,24 +555,30 @@ local function settleSession(reason)
     ledger.reason=reason
     saveLedger()
     local due=math.max(0,ledger.pending-ledger.spent)
-    while due>0 do
+    -- No entrar en bucle infinito si no hay monedas de cambio.
+    -- Se conserva el registro y se reintenta cuando se repone el inventario.
+    if due>0 then
         local returned,why=refundExact(due)
         due=math.max(0,ledger.pending-ledger.spent)
         if due>0 then
-            -- Una sesion segura NO expone el cambio por si sola:
-            -- esta funcion solo se invoca despues del PIN o autorizacion admin.
+            ledger.active=false
+            if ledger.mode=="24horas" and ledger.session_pin~="" then
+                ledger.claim_required=true -- Nunca dejar el cambio desprotegido.
+            end
+            ledger.reason="CAMBIO PENDIENTE"
+            saveLedger()
             drawMain({status="CAMBIO PENDIENTE",credit=ledger.pending,
                 cost=ledger.spent,served=ledger.served,mode=ledger.mode,
-                message=tostring(why or "Libera espacio en el barril derecho")})
-            sleep(cfg.change_retry_time)
+                message=tostring(why or "Libera espacio a la derecha")})
+            return false,ledger.spent,ledger.served,why
         end
     end
     ledger.total_fe=ledger.total_fe+ledger.served
     ledger.total_paid=ledger.total_paid+ledger.spent
     local cost=ledger.spent
     local served=ledger.served
-    resetSession() -- El PIN se borra SOLO aqui, una vez atendido el cambio.
-    return cost,served
+    resetSession() -- Se borra el PIN SOLO tras devolver TODO el cambio.
+    return true,cost,served,nil
 end
 local function freezeProtected(reason)
     closeValve()
@@ -587,8 +600,8 @@ local function finishSession(reason, authorized)
         freezeProtected(reason)
         return false,ledger.spent,ledger.served
     end
-    local paid,fe=settleSession(reason)
-    return true,paid,fe
+    local completed,paid,fe=settleSession(reason)
+    return completed,paid,fe
 end
 
 
@@ -1445,8 +1458,10 @@ local function beginSession()
         sleep(1.5)
         return
     end
-    if startBlockedByChange(amounts) then
-        drawMain({status="SIN CAMBIO",message="Repon 9 Diamond Coins en la caja"})
+    local missing=missingChangeReserve(amounts)
+    if missing>0 then
+        drawMain({status="SIN CAMBIO",
+            message="Pon "..missing.." Diamond Coins debajo"})
         sleep(2)
         return
     end
@@ -1484,6 +1499,14 @@ local function claimOrResume(resume)
     if not ledger.claim_required or ledger.mode~="24horas" then return end
     if not checkSessionPIN(resume and "REANUDAR SESION" or "FINALIZAR SESION") then return end
     if resume then
+        -- Una devolucion iniciada no puede convertirse otra vez en consumo.
+        if ledger.reason=="CAMBIO PENDIENTE" then
+            drawMain({status="CAMBIO PENDIENTE",credit=ledger.pending,
+                cost=ledger.spent,served=ledger.served,mode=ledger.mode,
+                message="Repon monedas y pulsa F + PIN"})
+            sleep(2)
+            return
+        end
         if remainingFE() <= 0 then
             drawMain({status="SIN CREDITO",message="Primero finaliza y reclama tu saldo"})
             sleep(2) return
@@ -1494,9 +1517,15 @@ local function claimOrResume(resume)
         end
         runSession()
     else
-        local paid,fe=settleSession("PARADO CON PIN")
-        drawMain({status="FINALIZADO", cost=paid,served=fe,
-            message="Cambio entregado. PIN eliminado."})
+        local completed,paid,fe,why=settleSession("PARADO CON PIN")
+        if completed then
+            drawMain({status="FINALIZADO", cost=paid,served=fe,
+                message="Cambio entregado. PIN eliminado."})
+        else
+            drawMain({status="CAMBIO PENDIENTE",credit=ledger.pending,
+                cost=ledger.spent,served=ledger.served,mode=ledger.mode,
+                message=tostring(why or "Repon monedas y repite F+PIN")})
+        end
         sleep(2)
     end
 end
@@ -1534,11 +1563,28 @@ local function main()
         refreshInventories()
         closeValve()
         if ledger.claim_required then
-            sessionScreen("PIN PARA RECUPERAR SALDO | F: FIN | R: SEGUIR",false,0)
+            local message="PIN PARA RECUPERAR SALDO | F: FIN | R: SEGUIR"
+            if ledger.reason=="CAMBIO PENDIENTE" then
+                -- Mostrar la falta de monedas antes de pedir el PIN otra vez.
+                local stock=countCurrency(storage)
+                local due=math.max(0,ledger.pending-ledger.spent)
+                local nc=math.min(math.floor(due/10),stock.netherite)
+                local missing=math.max(0,due-10*nc-stock.diamond)
+                message=missing>0 and ("REPON "..missing.." DC ABAJO | F+PIN")
+                    or "CAMBIO LISTO | F+PIN PARA COBRAR"
+            end
+            sessionScreen(message,false,0)
         elseif ledger.pending>0 then
-            -- Caso de reinicio en modo repostada: se intenta devolver cambio.
-            local c=settleSession("RECUPERACION")
-            drawMain({status="RECUPERACION",message="Saldo recuperado"})
+            -- Reintenta liquidar una vez, sin dejar la pantalla atrapada.
+            -- El saldo y el PIN se mantienen guardados mientras falte cambio.
+            local completed,paid,fe,why=settleSession("RECUPERACION")
+            if completed then
+                drawMain({status="RECUPERACION",message="Cambio entregado"})
+            else
+                drawMain({status="CAMBIO PENDIENTE",credit=ledger.pending,
+                    cost=ledger.spent,served=ledger.served,mode=ledger.mode,
+                    message=tostring(why or "Revisa el almacen inferior")})
+            end
         elseif cfg.out_of_service then
             drawOutOfService()
         elseif not payment then
@@ -1554,7 +1600,7 @@ local function main()
             local value=valueOf(c)
             local invalid=countInvalidItems()
             local msg
-            if startBlockedByChange(c) then msg="Para NC, pon 9 DC de cambio en caja"
+            if startBlockedByChange(c) then msg="Para NC, pon "..missingChangeReserve(c).." DC abajo"
             elseif value>=cfg.coins_per_block then msg="F iniciar | M modo | D diagnostico"
             elseif value>0 then msg="Faltan "..(cfg.coins_per_block-value).." DC"
             elseif invalid>0 then msg="Objeto invalido en barril pago"
