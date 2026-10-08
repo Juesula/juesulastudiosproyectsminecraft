@@ -3,9 +3,9 @@
 -- CC:Tweaked + Create Crafts & Additions + Lightman's Currency
 --
 -- CONSERVA la interfaz, menus y cobro originales.
--- PAGO REAL: Diamond Coins + Netherite Coins (1 NC = 10 DC).
--- TARIFA: 3 DC por 10 FE (redondeo por bloque).
--- Item: lightmanscurrency:coin_diamond
+-- PAGO REAL: exclusivamente Netherite Coins.
+-- TARIFA: 1 Netherite Coin = 1000 FE (10 NC = 10000 FE).
+-- Item: lightmanscurrency:coin_netherite
 -- Derecha = pago y cambio; abajo = cualquier inventario CC:Tweaked compatible.
 -- Relay electrico a la izquierda; redstone de control por detras.
 -- F/Click: iniciar/parar (PIN obligatorio para detener 24h).
@@ -27,15 +27,16 @@
 -- Configurar modo DIRECTO para activacion por senal continua de redstone.
 -- ============================================================
 
-local APP_VERSION = "V6"
-local CONFIG_FILE = "/electroluz_diamond.cfg"
+local APP_VERSION = "V7"
+local CONFIG_FILE = "/electroluz_netherite.cfg"
+local LEGACY_CONFIG_FILE = "/electroluz_diamond.cfg"
 -- Registro de diagnostico (sin PIN, sin datos sensibles).
-local DIAG_FILE = "/electroluz_diagnostico_v4.dat"
-local LEDGER_FILE = "/electroluz_diamond_seguro_ledger.dat"
+local DIAG_FILE = "/electroluz_diagnostico_v7.dat"
+-- Registro NUEVO: no reinterpretar saldos antiguos de Diamond Coins como NC.
+-- Liquidar las sesiones anteriores con V6 antes de cambiar la version.
+local LEDGER_FILE = "/electroluz_netherite_seguro_ledger.dat"
 local ADMIN_PIN = "2050"
-local DIAMOND_COIN_ID = "lightmanscurrency:coin_diamond"
 local NETHERITE_COIN_ID = "lightmanscurrency:coin_netherite"
-local NETHERITE_VALUE = 10
 
 local defaults = {
     station_name = "ELECTROLUZ",
@@ -48,10 +49,10 @@ local defaults = {
     meter_id = "E1",
     relay_name = "left", -- Relay electrico a la izquierda.
 
-    token_name = "DiamondCoin",
-    token_item_id = DIAMOND_COIN_ID,
-    coins_per_block = 3,
-    fe_per_block = 10,
+    token_name = "NetheriteCoin",
+    token_item_id = NETHERITE_COIN_ID,
+    coins_per_block = 1,
+    fe_per_block = 1000,
     mode = "repostada", -- Alternar con M: repostada/24horas.
     max_hours = 24,
     ticks_per_second = 20, -- CALIBRAR segun version del Relay.
@@ -167,8 +168,12 @@ end
 local function loadConfig()
     copyDefaults()
 
-    if fs.exists(CONFIG_FILE) then
-        local f = fs.open(CONFIG_FILE, "r")
+    local configToRead = CONFIG_FILE
+    if not fs.exists(CONFIG_FILE) and fs.exists(LEGACY_CONFIG_FILE) then
+        configToRead = LEGACY_CONFIG_FILE -- Migrar nombres, lados y PIN administrativo.
+    end
+    if fs.exists(configToRead) then
+        local f = fs.open(configToRead, "r")
         if f then
             local data = textutils.unserialize(f.readAll())
             f.close()
@@ -197,9 +202,12 @@ local function loadConfig()
     if cfg.mode ~= "repostada" and cfg.mode ~= "24horas" then cfg.mode = "repostada" end
     -- La modalidad continua dura como maximo 24 horas reales.
     cfg.max_hours = 24
-    -- Forzar diamante aun si una configuracion anterior tenia netherite.
-    cfg.token_item_id = DIAMOND_COIN_ID
-    cfg.token_name = "DiamondCoin"
+    -- Tarifa FIJA, sin fracciones de Netherite ni monedas de cambio.
+    -- No permitir que una cfg antigua sobreescriba el precio nuevo.
+    cfg.coins_per_block = 1
+    cfg.fe_per_block = 1000
+    cfg.token_item_id = NETHERITE_COIN_ID
+    cfg.token_name = "NetheriteCoin"
 
     saveConfig()
 end
@@ -303,12 +311,10 @@ local function inventoryTransfersReady()
 end
 
 -- ============================================================
--- MONEDAS MIXTAS + LIBRO DE SESION SEGURO
+-- NETHERITE COINS + LIBRO DE SESION SEGURO
 -- ============================================================
--- 1 Netherite Coin = 10 Diamond Coins de VALOR (NO se fabrican monedas).
 local denominations = {
-    diamond = {id=DIAMOND_COIN_ID, value=1},
-    netherite = {id=NETHERITE_COIN_ID, value=NETHERITE_VALUE},
+    netherite = {id=NETHERITE_COIN_ID, value=1},
 }
 local function normalizeItemID(value)
     if type(value) ~= "string" then return "" end
@@ -322,7 +328,7 @@ local function itemDenom(item)
     end
 end
 local function countCurrency(inv)
-    local counts = {diamond=0,netherite=0}
+    local counts = {netherite=0}
     if not inv then return counts end
     local ok, items = pcall(inv.list)
     if not ok or type(items) ~= "table" then return counts end
@@ -333,7 +339,7 @@ local function countCurrency(inv)
     return counts
 end
 local function valueOf(c)
-    return (c.diamond or 0) + NETHERITE_VALUE*(c.netherite or 0)
+    return (c.netherite or 0)
 end
 local function countInvalidItems()
     if not payment then return 0 end
@@ -392,9 +398,9 @@ end
 local closeValve, drawMain
 local ledger = {
     pending=0, spent=0, total_fe=0, total_paid=0,
-    diamond_in=0, netherite_in=0,
+    netherite_in=0,
     active=false, claim_required=false, mode="", session_pin="",
-    start_ms=0, served=0, reason="", price_coins=3, price_fe=10,
+    start_ms=0, served=0, reason="", price_coins=1, price_fe=1000,
 }
 local function saveLedger()
     -- Copia anterior para poder recuperar el registro si falla un guardado.
@@ -477,73 +483,49 @@ local function showDiagnostic()
     print("Flujo Relay: "..tostring(data.flujo).." (FE por lectura)")
     print("FE estimados: "..tostring(math.floor(data.fe or 0)))
     print("FE comprados: "..tostring(data.limite))
-    print("Monedas: "..tostring(data.credito).." DC")
-    print("Coste: "..tostring(data.coste).." DC")
+    print("Monedas: "..tostring(data.credito).." NC")
+    print("Coste: "..tostring(data.coste).." NC")
     print("")
     print("NOTA: el flujo NO es contador acumulado.")
     print("Conversor: ticks/seg = "..tostring(cfg.ticks_per_second))
-    print("El precio sigue siendo 3 DC / 10 FE.")
+    print("Precio: 1 NC = 1000 FE.")
     print("")
     print("Pulsa una tecla...")
     os.pullEvent("key")
 end
-local function missingChangeReserve(amounts)
-    -- Unicamente si se aceptan Netherite Coins hay riesgo de necesitar
-    -- fraccionar su valor (1 NC = 10 DC). Reservar hasta 9 DC fisicos.
-    -- Si solamente se pagan Diamond Coins no se exige ninguna reserva extra.
-    if (amounts.netherite or 0) <= 0 then return 0 end
-    local stock=countCurrency(storage)
-    return math.max(0, 9-stock.diamond-(amounts.diamond or 0))
-end
-local function startBlockedByChange(amounts)
-    return missingChangeReserve(amounts)>0
-end
+-- Con una sola denominacion no hace falta reservar monedas de cambio.
 local function addPaymentFunds(amounts)
-    -- Cada movimiento confirmado se registra; ante error se detiene el servicio.
-    local moved={diamond=0,netherite=0}
-    for _,key in ipairs({"diamond","netherite"}) do
-        if (amounts[key] or 0)>0 then
-            moved[key]=moveDenom(payment,storageName,key,amounts[key])
-            if moved[key]>0 then
-                ledger.pending=ledger.pending+moved[key]*denominations[key].value
-                if key=="diamond" then ledger.diamond_in=ledger.diamond_in+moved[key]
-                else ledger.netherite_in=ledger.netherite_in+moved[key] end
-                saveLedger()
-            end
-            if moved[key]~=amounts[key] then return false, moved end
-        end
+    local requested = math.floor(amounts.netherite or 0)
+    if requested <= 0 then return true, 0 end
+    local moved = moveDenom(payment,storageName,"netherite",requested)
+    if moved>0 then
+        ledger.pending=ledger.pending+moved
+        ledger.netherite_in=ledger.netherite_in+moved
+        saveLedger()
     end
-    return true,moved
+    return moved==requested,moved
 end
 local function refundExact(change)
     refreshInventories()
     if not payment or not storage then return 0,"FALTA INVENTARIO" end
     if not inventoryTransfersReady() then return 0,"INVENTARIO SIN TRANSFERENCIA" end
-    local stock=countCurrency(storage)
-    -- Siempre que sea posible, devolver Netherite Coins completas primero.
-    -- Si falta una fraccion, especificar la cantidad EXACTA de DC a reponer.
-    local n=math.min(math.floor(change/NETHERITE_VALUE),stock.netherite)
-    local d=change-NETHERITE_VALUE*n
-    if d>stock.diamond then
-        return 0,"FALTAN "..tostring(d-stock.diamond).." DIAMOND COINS ABAJO"
+    local due=math.floor(math.max(0,change))
+    if due==0 then return 0,nil end
+    local available=countCurrency(storage).netherite
+    if available<due then
+        return 0,"FALTAN "..tostring(due-available).." NETHERITE COINS ABAJO"
     end
-    local valueMoved=0
-    for _,entry in ipairs({{"netherite",n},{"diamond",d}}) do
-        local key,quantity=entry[1],entry[2]
-        if quantity>0 then
-            local m=moveDenom(storage,paymentName,key,quantity)
-            local v=m*denominations[key].value
-            valueMoved=valueMoved+v
-            ledger.pending=math.max(ledger.spent,ledger.pending-v)
-            saveLedger()
-            if m~=quantity then return valueMoved,"BARRIL LLENO O CAMBIO INSUFICIENTE" end
-        end
+    local moved=moveDenom(storage,paymentName,"netherite",due)
+    if moved>0 then
+        ledger.pending=math.max(ledger.spent,ledger.pending-moved)
+        saveLedger()
     end
-    return valueMoved,nil
+    if moved~=due then return moved,"BARRIL LLENO O CAMBIO INSUFICIENTE" end
+    return moved,nil
 end
 local function resetSession()
     ledger.pending,ledger.spent=0,0
-    ledger.diamond_in,ledger.netherite_in=0,0
+    ledger.netherite_in=0
     ledger.active,ledger.claim_required=false,false
     ledger.mode,ledger.session_pin,ledger.reason="","",""
     ledger.start_ms,ledger.served=0,0
@@ -726,16 +708,16 @@ drawMain = function(state)
     local remaining = math.max(0, credit - cost)
 
     writeAt(2, 5, "CREDITO")
-    writeAt(16, 5, tostring(credit) .. " DC", colors.yellow)
+    writeAt(16, 5, tostring(credit) .. " NC", colors.yellow)
 
     writeAt(2, 6, "SUMINISTRADO")
     writeAt(16, 6, tostring(math.floor(served)) .. " FE", colors.cyan)
 
     writeAt(2, 7, "COSTE")
-    writeAt(16, 7, tostring(cost) .. " DC", colors.orange)
+    writeAt(16, 7, tostring(cost) .. " NC", colors.orange)
 
     writeAt(2, 8, "RESTANTE")
-    writeAt(16, 8, tostring(remaining) .. " DC", colors.lime)
+    writeAt(16, 8, tostring(remaining) .. " NC", colors.lime)
     if state.fe_remaining ~= nil then
         writeAt(2, 9, "FE PENDIENTES")
         writeAt(16, 9, tostring(math.floor(math.max(0,state.fe_remaining))) .. " FE",colors.lime)
@@ -747,7 +729,7 @@ drawMain = function(state)
     end
 
     writeAt(2, 12, "PRECIO")
-    writeAt(10, 12, tostring(cfg.coins_per_block) .. " DC = " .. tostring(cfg.fe_per_block) .. " FE")
+    writeAt(10, 12, tostring(cfg.coins_per_block) .. " NC = " .. tostring(cfg.fe_per_block) .. " FE")
     writeAt(2, 13, "MODO: " .. (state.mode or cfg.mode) .. " [M]", colors.yellow)
 
     if state.message then
@@ -820,15 +802,14 @@ local function diagnosticCoins()
     if not payment then print("No encuentro inventario de pago")
     else
         local c=countCurrency(payment)
-        print("Diamond Coins: "..c.diamond)
         print("Netherite Coins: "..c.netherite)
-        print("Valor: "..valueOf(c).." DC")
+        print("Valor: "..valueOf(c).." NC")
         print("Objetos invalidos: "..countInvalidItems())
     end
     print("Almacen: "..tostring(storageName or "NO DETECTADO"))
     if storage then
         local c=countCurrency(storage)
-        print("Caja: "..c.diamond.." DC / "..c.netherite.." NC")
+        print("Caja: "..c.netherite.." NC")
         print("Ingreso: "..(canTransferItems(payment,storage) and "SI" or "NO"))
         print("Cambio: "..(canTransferItems(storage,payment) and "SI" or "NO"))
     end
@@ -940,17 +921,12 @@ local function adminOptions()
         },
 
         {
-            label="Monedas por bloque",
-            value=function() return cfg.coins_per_block end,
+            label="Precio (fijo)",
+            value=function() return "1 NC = 1000 FE" end,
             edit=function()
-                cfg.coins_per_block = math.floor(promptNumber("Diamond Coins por bloque", cfg.coins_per_block, 1))
-            end
-        },
-        {
-            label="FE por bloque",
-            value=function() return cfg.fe_per_block end,
-            edit=function()
-                cfg.fe_per_block = promptNumber("FE por bloque", cfg.fe_per_block, 0.001)
+                clear()
+                centerText(5,"TARIFA FIJA: 1 NC/1000 FE")
+                sleep(2)
             end
         },
         {
@@ -1332,14 +1308,14 @@ local function runSession()
         -- Guardar la primera muestra aun si se agota al instante.
         if firstSample then saveDiagnostic("PRIMERA MUESTRA", rate) firstSample=false end
 
-        -- Puede recargar durante las 24 horas. Primero verificamos cambio.
+        -- Permitir recargas con Netherite Coins durante el modo 24 horas.
         if ledger.mode=="24horas" and not reason then
             refreshInventories()
             if not payment or not storage or not inventoryTransfersReady() then
                 reason="ERROR INVENTARIO"
             else
                 local topup=countCurrency(payment)
-                if valueOf(topup)>0 and not startBlockedByChange(topup) then
+                if valueOf(topup)>0 then
                     local ok=addPaymentFunds(topup)
                     if not ok then reason="ERROR RECARGA" end
                 end
@@ -1355,8 +1331,7 @@ local function runSession()
         if ledger.mode=="24horas" and now-ledger.start_ms>=cfg.max_hours*3600000 then
             reason="24 HORAS COMPLETADAS"
         end
-        -- No agotar el credito al cobrar el PRIMER FE de un bloque de 10.
-        -- Cada bloque comprado se puede utilizar hasta completar sus 10 FE.
+        -- El bloque de 1000 FE se disfruta entero tras cargar su Netherite Coin.
         if remainingFE() <= 0 then
             -- No ocultar un flujo extremo detras de un error de credito.
             -- El cobro sigue limitado al credito ingresado, pero puede
@@ -1432,7 +1407,7 @@ local function runSession()
             cost=cost, throughput=rate, mode=cfg.mode,
             message=(reason=="FLUJO DEMASIADO ALTO")
                 and ("Relay: "..math.floor(rate).." FE/t. D: diagnostico")
-                or ("Cobrado: "..cost.." DC. Cambio: "..(credit-cost).." DC")})
+                or ("Cobrado: "..cost.." NC. Cambio: "..(credit-cost).." NC")})
         sleep(2.5)
     end
 end
@@ -1454,15 +1429,8 @@ local function beginSession()
     local amounts=countCurrency(payment)
     local value=valueOf(amounts)
     if not creditEnough(value) then
-        drawMain({status="SIN CREDITO",message="Introduce al menos "..cfg.coins_per_block.." DC"})
+        drawMain({status="SIN CREDITO",message="Introduce al menos "..cfg.coins_per_block.." NC"})
         sleep(1.5)
-        return
-    end
-    local missing=missingChangeReserve(amounts)
-    if missing>0 then
-        drawMain({status="SIN CAMBIO",
-            message="Pon "..missing.." Diamond Coins debajo"})
-        sleep(2)
         return
     end
     local pin=""
@@ -1476,7 +1444,7 @@ local function beginSession()
     ledger.price_fe=cfg.fe_per_block
     ledger.session_pin=pin
     ledger.pending,ledger.spent,ledger.served=0,0,0
-    ledger.diamond_in,ledger.netherite_in=0,0
+    ledger.netherite_in=0
     ledger.active=false
     ledger.claim_required=false
     ledger.reason=""
@@ -1568,9 +1536,8 @@ local function main()
                 -- Mostrar la falta de monedas antes de pedir el PIN otra vez.
                 local stock=countCurrency(storage)
                 local due=math.max(0,ledger.pending-ledger.spent)
-                local nc=math.min(math.floor(due/10),stock.netherite)
-                local missing=math.max(0,due-10*nc-stock.diamond)
-                message=missing>0 and ("REPON "..missing.." DC ABAJO | F+PIN")
+                local missing=math.max(0,due-stock.netherite)
+                message=missing>0 and ("REPON "..missing.." NC ABAJO | F+PIN")
                     or "CAMBIO LISTO | F+PIN PARA COBRAR"
             end
             sessionScreen(message,false,0)
@@ -1600,11 +1567,10 @@ local function main()
             local value=valueOf(c)
             local invalid=countInvalidItems()
             local msg
-            if startBlockedByChange(c) then msg="Para NC, pon "..missingChangeReserve(c).." DC abajo"
-            elseif value>=cfg.coins_per_block then msg="F iniciar | M modo | D diagnostico"
-            elseif value>0 then msg="Faltan "..(cfg.coins_per_block-value).." DC"
+            if value>=cfg.coins_per_block then msg="F iniciar | M modo | D diagnostico"
+            elseif value>0 then msg="Faltan "..(cfg.coins_per_block-value).." NC"
             elseif invalid>0 then msg="Objeto invalido en barril pago"
-            else msg="Introduce Diamond / Netherite Coins" end
+            else msg="Introduce Netherite Coins" end
             drawMain({status=value>=cfg.coins_per_block and "LISTO" or "ESPERANDO PAGO",
                 credit=value,served=0,cost=0,throughput=0,mode=cfg.mode,message=msg})
         end
