@@ -6,7 +6,7 @@
 -- PAGO REAL: Diamond Coins + Netherite Coins (1 NC = 10 DC).
 -- TARIFA: 3 DC por 10 FE (redondeo por bloque).
 -- Item: lightmanscurrency:coin_diamond
--- Barril derecho = insertar y recibir cambio; abajo = caja de ingresos.
+-- Derecha = pago y cambio; abajo = cualquier inventario CC:Tweaked compatible.
 -- Relay electrico a la izquierda; redstone de control por detras.
 -- F/Click: iniciar/parar (PIN obligatorio para detener 24h).
 -- M: alternar 24 horas / repostada. C: administracion.
@@ -27,7 +27,10 @@
 -- Configurar modo DIRECTO para activacion por senal continua de redstone.
 -- ============================================================
 
+local APP_VERSION = "V5"
 local CONFIG_FILE = "/electroluz_diamond.cfg"
+-- Registro de diagnostico (sin PIN, sin datos sensibles).
+local DIAG_FILE = "/electroluz_diagnostico_v4.dat"
 local LEDGER_FILE = "/electroluz_diamond_seguro_ledger.dat"
 local ADMIN_PIN = "2050"
 local DIAMOND_COIN_ID = "lightmanscurrency:coin_diamond"
@@ -54,7 +57,7 @@ local defaults = {
     ticks_per_second = 20, -- CALIBRAR segun version del Relay.
 
     payment_side = "right",
-    storage_side = "bottom",
+    storage_side = "bottom", -- Cualquier inventario; tambien admite nombre de modem.
 
     open_side = "back", -- Redstone hacia el Relay electrico.
     close_side = "top", -- Solo para el modo de pulsos; left ocupado por Relay.
@@ -266,6 +269,9 @@ end
 
 
 
+-- Acepta inventarios GENERICOS de CC:Tweaked, no un bloque especifico.
+-- Para transferir, basta con pushItems del origen O pullItems del destino.
+-- Esto permite usar una interfaz/cajon que solo implemente parte de la API.
 local function refreshInventories()
     payment = peripheral.wrap(cfg.payment_side)
     storage = peripheral.wrap(cfg.storage_side)
@@ -273,17 +279,27 @@ local function refreshInventories()
     paymentName = payment and peripheral.getName(payment) or nil
     storageName = storage and peripheral.getName(storage) or nil
 
-    if payment and
-       (type(payment.list) ~= "function" or
-        type(payment.pushItems) ~= "function") then
+    if payment and type(payment.list) ~= "function" then
         payment, paymentName = nil, nil
     end
-
-    if storage and
-       (type(storage.list) ~= "function" or
-        type(storage.pushItems) ~= "function") then
+    if storage and type(storage.list) ~= "function" then
         storage, storageName = nil, nil
     end
+    if paymentName and storageName and paymentName == storageName then
+        -- Nunca usar la misma caja como entrada de pagos y almacen.
+        storage, storageName = nil, nil
+    end
+end
+
+local function canTransferItems(source, destination)
+    return source ~= nil and destination ~= nil and
+        (type(source.pushItems) == "function" or
+         type(destination.pullItems) == "function")
+end
+
+local function inventoryTransfersReady()
+    return canTransferItems(payment, storage) and
+           canTransferItems(storage, payment)
 end
 
 -- ============================================================
@@ -329,18 +345,45 @@ local function countInvalidItems()
     end
     return total
 end
+-- Transferencia bidireccional adaptable a cualquier inventario generico.
+-- Si el origen no puede enviar, el destino intenta recoger (pullItems).
 local function moveDenom(source, destinationName, key, amount)
-    local moved=0
+    local moved = 0
     if not source or not destinationName or amount<=0 then return 0 end
+    local destination = peripheral.wrap(destinationName)
+    if not destination then return 0 end
+    local sourceName = peripheral.getName(source)
+    if not canTransferItems(source, destination) then return 0 end
     local ok, items = pcall(source.list)
-    if not ok then return 0 end
+    if not ok or type(items) ~= "table" then return 0 end
+
     for slot, item in pairs(items) do
         if itemDenom(item) == key then
-            local wanted = math.min(item.count, amount-moved)
-            local success, actual = pcall(source.pushItems, destinationName, slot, wanted)
-            if not success then break end
-            moved = moved + (actual or 0)
-            if moved>=amount then break end
+            local wanted = math.min(math.floor(item.count), amount-moved)
+            local transferred = 0
+            if type(source.pushItems) == "function" then
+                local success, n = pcall(source.pushItems, destinationName, slot, wanted)
+                if success and type(n) == "number" then
+                    transferred = math.max(0, math.min(wanted, math.floor(n)))
+                end
+            end
+            -- Algunos cajones, interfaces y cofres virtuales solo aceptan
+            -- operaciones desde el otro inventario (pullItems).
+            if transferred < wanted and type(destination.pullItems) == "function"
+                    and sourceName then
+                local available, current = pcall(source.list)
+                if available and type(current) == "table" and
+                        itemDenom(current[slot]) == key then
+                    local success, n = pcall(destination.pullItems,
+                        sourceName, slot, wanted-transferred)
+                    if success and type(n) == "number" then
+                        transferred = transferred + math.max(0,
+                            math.min(wanted-transferred, math.floor(n)))
+                    end
+                end
+            end
+            moved = moved + transferred
+            if moved >= amount then break end
         end
     end
     return moved
@@ -399,6 +442,51 @@ end
 local function remainingFE()
     return math.max(0, prepaidFE() - ledger.served)
 end
+
+local lastDiagnostic = {flujo=0, fe=0, limite=0, credito=0, coste=0,
+    marca_ms=0, estado="SIN LECTURAS", version=APP_VERSION}
+local function saveDiagnostic(status, rate)
+    -- Guardamos la lectura real y el limite comprado para investigar
+    -- consumos repentinos. NO incluir el PIN de la sesion.
+    local data = {
+        version=APP_VERSION, estado=tostring(status or "MIDIENDO"),
+        flujo=tonumber(rate) or 0, fe=ledger.served,
+        limite=prepaidFE(), credito=ledger.pending,
+        coste=ledger.spent, marca_ms=os.epoch("utc"),
+        modo=ledger.mode
+    }
+    lastDiagnostic=data
+    local f=fs.open(DIAG_FILE,"w")
+    if f then f.write(textutils.serialize(data)) f.close() end
+end
+local function showDiagnostic()
+    closeValve() -- No abrir/cerrar durante una sesion: solo se invoca en espera.
+    local data=lastDiagnostic
+    if fs.exists(DIAG_FILE) then
+        local f=fs.open(DIAG_FILE,"r")
+        if f then
+            local ok, saved=pcall(textutils.unserialize,f.readAll())
+            f.close()
+            if ok and type(saved)=="table" then data=saved end
+        end
+    end
+    clear()
+    centerText(1,"ELECTROLUZ "..APP_VERSION.." DIAGNOSTICO")
+    print("")
+    print("Ultimo corte: "..tostring(data.estado))
+    print("Flujo Relay: "..tostring(data.flujo).." (FE por lectura)")
+    print("FE estimados: "..tostring(math.floor(data.fe or 0)))
+    print("FE comprados: "..tostring(data.limite))
+    print("Monedas: "..tostring(data.credito).." DC")
+    print("Coste: "..tostring(data.coste).." DC")
+    print("")
+    print("NOTA: el flujo NO es contador acumulado.")
+    print("Conversor: ticks/seg = "..tostring(cfg.ticks_per_second))
+    print("El precio sigue siendo 3 DC / 10 FE.")
+    print("")
+    print("Pulsa una tecla...")
+    os.pullEvent("key")
+end
 local function startBlockedByChange(amounts)
     if (amounts.netherite or 0)<=0 then return false end
     -- No hay conversor fisico de monedas. Garantizar hasta 9 DC para
@@ -426,6 +514,7 @@ end
 local function refundExact(change)
     refreshInventories()
     if not payment or not storage then return 0,"FALTA INVENTARIO" end
+    if not inventoryTransfersReady() then return 0,"INVENTARIO SIN TRANSFERENCIA" end
     local stock=countCurrency(storage)
     local n=math.min(math.floor(change/NETHERITE_VALUE),stock.netherite)
     while n>=0 and (change-NETHERITE_VALUE*n)>stock.diamond do n=n-1 end
@@ -601,7 +690,7 @@ drawMain = function(state)
         centerText(1, cfg.station_name)
     end
 
-    centerText(2, cleanID(cfg.station_id) .. " | " .. cleanID(cfg.group_id))
+    centerText(2, cleanID(cfg.station_id) .. " | " .. cleanID(cfg.group_id) .. " " .. APP_VERSION)
 
     local status = state.status or "ESPERANDO"
     local statusColor = colors.white
@@ -715,13 +804,20 @@ local function diagnosticCoins()
     clear()
     print("DIAGNOSTICO MONEDAS")
     print("-------------------")
-    if not payment then print("No encuentro barril pago")
+    if not payment then print("No encuentro inventario de pago")
     else
         local c=countCurrency(payment)
         print("Diamond Coins: "..c.diamond)
         print("Netherite Coins: "..c.netherite)
         print("Valor: "..valueOf(c).." DC")
         print("Objetos invalidos: "..countInvalidItems())
+    end
+    print("Almacen: "..tostring(storageName or "NO DETECTADO"))
+    if storage then
+        local c=countCurrency(storage)
+        print("Caja: "..c.diamond.." DC / "..c.netherite.." NC")
+        print("Ingreso: "..(canTransferItems(payment,storage) and "SI" or "NO"))
+        print("Cambio: "..(canTransferItems(storage,payment) and "SI" or "NO"))
     end
     print("")
     print("Pulsa una tecla...")
@@ -866,10 +962,13 @@ local function adminOptions()
         },
 
         {
-            label="Barril almacen",
+            label="Inventario almacen",
             value=function() return cfg.storage_side end,
             edit=function()
-                cfg.storage_side = promptSide("Barril almacen", cfg.storage_side)
+                -- Permite bottom, top o un nombre como minecraft:chest_0
+                cfg.storage_side = cleanID(promptText(
+                    "LADO/NOMBRE DEL INVENTARIO", cfg.storage_side))
+                refreshInventories()
             end
         },
 
@@ -1167,7 +1266,8 @@ local function runSession()
         return
     end
     if remainingFE() <= 0 then
-        finishSession("CREDITO AGOTADO",false)
+        saveDiagnostic("SIN FE DISPONIBLES ANTES DE ABRIR",0)
+        finishSession("SIN CREDITO",false)
         return
     end
     local now=os.epoch("utc")
@@ -1182,12 +1282,18 @@ local function runSession()
     local zeroSince=now
     local lastSave=now
     local elapsedSinceStart=now
+    -- La interfaz enseña el saldo ANTES de permitir energia.
+    drawMain({status="CONECTANDO",credit=ledger.pending,cost=0,
+        served=ledger.served,throughput=0,mode=ledger.mode,
+        fe_remaining=remainingFE(),message="Preparando medicion "..APP_VERSION})
     openValve()
     -- El reloj de facturacion arranca DESPUES de habilitar el suministro.
     local lastAt=os.epoch("utc")
     local reason=nil
     local authorized=false
     local rate=0
+    local firstSample=true
+    local startedMs=lastAt
     while true do
         local action=waitAction()
         now=os.epoch("utc")
@@ -1210,11 +1316,14 @@ local function runSession()
         end
         local previousSpent=ledger.spent
         ledger.spent=math.min(ledger.pending,costFor(ledger.served))
+        -- Guardar la primera muestra aun si se agota al instante.
+        if firstSample then saveDiagnostic("PRIMERA MUESTRA", rate) firstSample=false end
 
         -- Puede recargar durante las 24 horas. Primero verificamos cambio.
         if ledger.mode=="24horas" and not reason then
             refreshInventories()
-            if not payment or not storage then reason="ERROR INVENTARIO"
+            if not payment or not storage or not inventoryTransfersReady() then
+                reason="ERROR INVENTARIO"
             else
                 local topup=countCurrency(payment)
                 if valueOf(topup)>0 and not startBlockedByChange(topup) then
@@ -1227,6 +1336,7 @@ local function runSession()
         -- Persistir siempre que cambie la parte cobrada y al menos cada 1s.
         if now-lastSave>=1000 or ledger.spent~=previousSpent or action~="sample" or reason then
             saveLedger()
+            saveDiagnostic("MIDIENDO", rate)
             lastSave=now
         end
         if ledger.mode=="24horas" and now-ledger.start_ms>=cfg.max_hours*3600000 then
@@ -1235,7 +1345,11 @@ local function runSession()
         -- No agotar el credito al cobrar el PRIMER FE de un bloque de 10.
         -- Cada bloque comprado se puede utilizar hasta completar sus 10 FE.
         if remainingFE() <= 0 then
-            reason="CREDITO AGOTADO"
+            -- No ocultar un flujo extremo detras de un error de credito.
+            -- El cobro sigue limitado al credito ingresado, pero puede
+            -- circular mas energia de la comprada entre dos lecturas.
+            reason = (now-startedMs <= 2000 and rate > 0)
+                and "FLUJO DEMASIADO ALTO" or "CREDITO AGOTADO"
         end
         if reason then break end
 
@@ -1293,14 +1407,19 @@ local function runSession()
     -- Conservamos los datos del coste y saldo antes de devolver cambio.
     ledger.spent=math.min(ledger.pending,costFor(ledger.served))
     saveLedger()
+    saveDiagnostic(reason or "FINALIZADO",rate)
     local credit,cost,served=ledger.pending,ledger.spent,ledger.served
     local done=finishSession(reason or "FINALIZADO",authorized)
     if not done then
-        sessionScreen("SALDO PROTEGIDO: F + PIN | R: REANUDAR",false,rate)
+        sessionScreen((reason=="FLUJO DEMASIADO ALTO"
+            and ("ALTO FLUJO: "..math.floor(rate).." FE/t. F+PIN reclamar")
+            or "SALDO PROTEGIDO: F + PIN | R: REANUDAR"),false,rate)
     else
         drawMain({status=reason or "FINALIZADO", credit=credit,served=served,
             cost=cost, throughput=rate, mode=cfg.mode,
-            message="Cobrado: "..cost.." DC. Cambio: "..(credit-cost).." DC"})
+            message=(reason=="FLUJO DEMASIADO ALTO")
+                and ("Relay: "..math.floor(rate).." FE/t. D: diagnostico")
+                or ("Cobrado: "..cost.." DC. Cambio: "..(credit-cost).." DC")})
         sleep(2.5)
     end
 end
@@ -1313,6 +1432,12 @@ local function beginSession()
     if v==nil then drawMain({status="ERROR RELAY",message=tostring(e)}) sleep(2) return end
     refreshInventories()
     if not payment or not storage then return end
+    if not inventoryTransfersReady() then
+        drawMain({status="ERROR INVENTARIO",
+            message="No permite ingresar y devolver monedas"})
+        sleep(2)
+        return
+    end
     local amounts=countCurrency(payment)
     local value=valueOf(amounts)
     if not creditEnough(value) then
@@ -1383,7 +1508,8 @@ local function waitIdleAction()
             if a==keys.f then return "start"
             elseif a==keys.c then return "admin"
             elseif a==keys.m then return "mode"
-            elseif a==keys.r then return "resume" end
+            elseif a==keys.r then return "resume"
+            elseif a==keys.d then return "diagnostico" end
         end
         if event=="mouse_click" and buttonClicked(b,c) then return "start" end
         if event=="timer" and a==timer then return "refresh" end
@@ -1418,7 +1544,9 @@ local function main()
         elseif not payment then
             drawMain({status="ERROR BARRIL PAGO",message="Falta barril en "..cfg.payment_side})
         elseif not storage then
-            drawMain({status="ERROR BARRIL ALMACEN",message="Falta inventario en "..cfg.storage_side})
+            drawMain({status="ERROR INVENTARIO",message="No hay inventario en "..cfg.storage_side})
+        elseif not inventoryTransfersReady() then
+            drawMain({status="ERROR INVENTARIO",message="No admite ingreso y devolucion de cambio"})
         elseif not refreshRelay() then
             drawMain({status="ERROR RELAY",message="Conecta Redstone Relay a la izquierda"})
         else
@@ -1427,7 +1555,7 @@ local function main()
             local invalid=countInvalidItems()
             local msg
             if startBlockedByChange(c) then msg="Para NC, pon 9 DC de cambio en caja"
-            elseif value>=cfg.coins_per_block then msg="F comenzar | M cambiar modo"
+            elseif value>=cfg.coins_per_block then msg="F iniciar | M modo | D diagnostico"
             elseif value>0 then msg="Faltan "..(cfg.coins_per_block-value).." DC"
             elseif invalid>0 then msg="Objeto invalido en barril pago"
             else msg="Introduce Diamond / Netherite Coins" end
@@ -1435,7 +1563,9 @@ local function main()
                 credit=value,served=0,cost=0,throughput=0,mode=cfg.mode,message=msg})
         end
         local action=waitIdleAction()
-        if action=="admin" then
+        if action=="diagnostico" then
+            showDiagnostic()
+        elseif action=="admin" then
             adminMenu()
             if adminCancelRequested then
                 adminCancelRequested=false
