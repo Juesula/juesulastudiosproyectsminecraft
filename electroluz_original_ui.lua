@@ -1,62 +1,49 @@
 -- ============================================================
--- ELECTROLUZ - ADAPTACION DEL SURTIDOR ORIGINAL
--- CC:Tweaked + Create Crafts & Additions + Lightman's Currency
+-- ELECTROLUZ: MEDIDOR IZQUIERDO (sin barriles)
+-- CC:Tweaked + Create Crafts & Additions
+-- Basado en la UI y la administracion del surtidor original.
 --
--- CONSERVA la interfaz, menus y cobro originales.
--- 1 FuelToken = 1 Netherite Coin
--- Item: lightmanscurrency:coin_netherite
+-- El Relay ELECTRICO va a la IZQUIERDA del ordenador.
+-- No se usan inventarios de monedas, ni acumulador ni ordenador remoto.
+-- La pantalla calcula el coste en FuelTokens (NO los cobra).
 --
--- Cliente: F / click = iniciar o parar
--- Administracion oculta: C, PIN 2050, flechas, ENTER, BACKSPACE
+-- F o click: comenzar/parar suministro
+-- C: menu oculto, PIN 2050, flechas, ENTER, BACKSPACE
 --
--- MEDICION: Redstone Relay electrico de Create Crafts & Additions
--- getThroughput() devuelve una lectura de flujo actual en FE.
--- Se estima el consumo como FE/t * ticks transcurridos (~20 t/s).
--- NO es un contador fiscal ni garantiza corte exacto sin calibracion.
---
--- IMPORTANTE: un Relay por cliente; no compartir ese paso de energia.
--- Configurar modo DIRECTO para activacion por senal continua de redstone.
+-- getThroughput() da flujo ACTUAL, no un contador acumulado.
+-- Se estima FE = flujo * segundos * ticks_por_segundo.
+-- Verificar esta conversion en la version concreta del mod.
 -- ============================================================
 
-local CONFIG_FILE = "/electroluz_original.cfg"
+local CONFIG_FILE = "/electroluz_original.cfg" -- conserva las preferencias anteriores
+local LEDGER_FILE = "/electroluz_consumo.dat"
 local ADMIN_PIN = "2050"
-local NETHERITE_COIN_ID = "lightmanscurrency:coin_netherite"
 
 local defaults = {
     station_name = "ELECTROLUZ",
     out_of_service = false,
-
-    -- Se conservan Grupo + ID de estacion + ID de medidor.
     group_id = "GRUPO1",
     station_id = "S" .. tostring(os.getComputerID()),
     meter_id = "E1",
-    relay_name = "auto", -- Nombre de periferico o auto si hay uno solo.
-
-    token_name = "FuelToken",
-    token_item_id = NETHERITE_COIN_ID,
-    fe_per_token = 10000, -- Precio configurable: FE por Netherite Coin.
-
-    payment_side = "right",
-    storage_side = "bottom",
-
-    open_side = "back", -- Redstone hacia el Relay electrico.
-    close_side = "left", -- Solo para el modo de pulsos.
+    fe_per_token = 10000,
+    -- Solo lectura por la izquierda. No hay barril de pago.
+    relay_side = "left",
+    open_side = "back",  -- salida redstone para habilitar el Relay
+    close_side = "right", -- solo modo pulso; nunca LEFT (ocupado por Relay)
     pulse_time = 0.15,
-    control_mode = "directo", -- directo=mantener senal; pulso=tu latch original.
-
+    control_mode = "directo",
     sample_time = 0.10,
-    no_flow_limit = 0, -- 0=permitir espera sin consumo (ideal para casas).
+    no_flow_limit = 0,   -- 0: la casa puede estar sin consumir temporalmente
     flow_epsilon_fe = 0,
     flow_grace_time = 1.0,
-
-    change_retry_time = 0.5,
+    ticks_per_second = 20,  -- FACTOR ESTIMADO: calibrar en la version del mod
 }
 
 local cfg = {}
-local payment, storage = nil, nil
-local paymentName, storageName = nil, nil
-local relay, relayName = nil, nil
+local relay = nil
+local ledger = {total_fe = 0, sessions = 0}
 local buttonBounds = {x1=1, x2=1, y1=1, y2=1}
+
 
 -- ============================================================
 -- TERMINAL
@@ -145,229 +132,111 @@ end
 
 local function loadConfig()
     copyDefaults()
-
     if fs.exists(CONFIG_FILE) then
         local f = fs.open(CONFIG_FILE, "r")
         if f then
-            local data = textutils.unserialize(f.readAll())
+            local ok, data = pcall(textutils.unserialize, f.readAll())
             f.close()
-
-            if type(data) == "table" then
-                if data.coin_id then cfg.token_item_id = data.coin_id end
-                if data.currency_name then cfg.token_name = data.currency_name end
-
-                for k, v in pairs(data) do
-                    if defaults[k] ~= nil then cfg[k] = v end
+            if ok and type(data) == "table" then
+                for key in pairs(defaults) do
+                    if data[key] ~= nil then cfg[key] = data[key] end
                 end
             end
         end
     end
-
+    cfg.relay_side = "left" -- exigido por esta instalacion
     cfg.group_id = cleanID(cfg.group_id)
     cfg.station_id = cleanID(cfg.station_id)
     cfg.meter_id = cleanID(cfg.meter_id)
     if type(cfg.fe_per_token) ~= "number" or cfg.fe_per_token < 1 then cfg.fe_per_token = defaults.fe_per_token end
     if type(cfg.sample_time) ~= "number" or cfg.sample_time < 0.05 then cfg.sample_time = defaults.sample_time end
+    if type(cfg.ticks_per_second) ~= "number" or cfg.ticks_per_second < 1 then cfg.ticks_per_second = 20 end
+    if type(cfg.flow_epsilon_fe) ~= "number" or cfg.flow_epsilon_fe < 0 then cfg.flow_epsilon_fe = 0 end
+    if type(cfg.flow_grace_time) ~= "number" or cfg.flow_grace_time < 0 then cfg.flow_grace_time = 1 end
+    if type(cfg.no_flow_limit) ~= "number" or cfg.no_flow_limit < 0 then cfg.no_flow_limit = 0 end
     if cfg.control_mode ~= "directo" and cfg.control_mode ~= "pulso" then cfg.control_mode = "directo" end
-
-    if cfg.token_item_id == "" or cfg.token_item_id == "CAMBIAR_ESTO" then
-        cfg.token_item_id = NETHERITE_COIN_ID
-    end
-
-    if cfg.token_name == "" or cfg.token_name == "monedas" then
-        cfg.token_name = "FuelToken"
-    end
-
+    if cfg.open_side == "left" then cfg.open_side = "back" end
+    if cfg.close_side == "left" then cfg.close_side = "right" end
     saveConfig()
 end
 
--- ============================================================
--- PERIFERICOS / INVENTARIOS
--- ============================================================
 
--- Busca el Relay ELECTRICO, no el redstone_relay propio de CC:Tweaked.
+-- ============================================================
+-- PERIFERICO IZQUIERDO: EL RELE ELECTRICO
+-- ============================================================
 local function refreshRelay()
-    relay, relayName = nil, nil
-    local requested = tostring(cfg.relay_name or "auto")
-    if requested ~= "auto" then
-        local p = peripheral.wrap(requested)
-        if p and type(p.getThroughput) == "function" then
-            relay, relayName = p, requested
-            return true
-        end
-        return false, "No se encuentra " .. requested
-    end
-
-    local found = 0
-    for _, name in ipairs(peripheral.getNames()) do
-        local p = peripheral.wrap(name)
-        if p and type(p.getThroughput) == "function" then
-            found = found + 1
-            relay, relayName = p, name
-        end
-    end
-    if found == 0 then return false, "No hay Relay electrico" end
-    if found > 1 then
-        relay, relayName = nil, nil
-        return false, "Varios Relay: configura nombre"
+    relay = peripheral.wrap("left")
+    if not relay or type(relay.getThroughput) ~= "function" then
+        relay = nil
+        return false, "Coloca el Relay electrico a la izquierda"
     end
     return true
 end
 
 local function readRelay()
-    if not relay or not relayName or not peripheral.isPresent(relayName) then
-        return nil, "RELAY DESCONECTADO"
+    if not relay or not peripheral.isPresent("left") then
+        return nil, "RELAY IZQUIERDO DESCONECTADO"
     end
     local ok, value = pcall(relay.getThroughput)
     if not ok or type(value) ~= "number" or value < 0 or value ~= value or value == math.huge then
-        return nil, "LECTURA RELAY INVALIDA"
+        return nil, "LECTURA DE RELE INVALIDA"
     end
     return value
 end
 
+local function loadLedger()
+    ledger = {total_fe = 0, sessions = 0}
+    if fs.exists(LEDGER_FILE) then
+        local f = fs.open(LEDGER_FILE, "r")
+        if f then
+            local ok, data = pcall(textutils.unserialize, f.readAll())
+            f.close()
+            if ok and type(data) == "table" and type(data.total_fe) == "number"
+                and data.total_fe >= 0 and data.total_fe < math.huge then
+                ledger.total_fe = data.total_fe
+                ledger.sessions = math.max(0, math.floor(tonumber(data.sessions) or 0))
+            end
+        end
+    end
+end
+
+local function saveLedger()
+    -- Primero escribimos un archivo temporal para no truncar el registro antiguo.
+    local temp = LEDGER_FILE .. ".tmp"
+    local f = fs.open(temp, "w")
+    if not f then error("No se pudo guardar contador") end
+    f.write(textutils.serialize(ledger))
+    f.close()
+    if fs.exists(LEDGER_FILE) then fs.delete(LEDGER_FILE) end
+    fs.move(temp, LEDGER_FILE)
+end
+
 local function diagnosticRelay()
-    refreshRelay()
-    clear() -- Funcion de la interfaz original.
-    print("DIAGNOSTICO RELE ELECTRICO")
+    clear()
+    print("DIAGNOSTICO RELE IZQUIERDO")
     print("--------------------------")
-    print("Perifericos con getThroughput:")
-    for _, name in ipairs(peripheral.getNames()) do
-        local p = peripheral.wrap(name)
-        if p and type(p.getThroughput) == "function" then
-            local ok, v = pcall(p.getThroughput)
-            print(name .. ": " .. (ok and tostring(v) or "ERROR") .. " FE")
+    local found, reason = refreshRelay()
+    print("Lado: left")
+    if not found then
+        print(reason)
+    else
+        local value, err = readRelay()
+        if value then
+            print("getThroughput(): " .. tostring(value))
+            print("Lectura de flujo FE (sin calibrar)")
+        else
+            print(tostring(err))
+        end
+        if type(relay.isPowered) == "function" then
+            local ok, state = pcall(relay.isPowered)
+            if ok then print("isPowered(): " .. tostring(state)) end
         end
     end
     print("")
-    print("Configurado: " .. tostring(cfg.relay_name))
     print("Pulsa una tecla...")
     os.pullEvent("key")
 end
 
-
-
-local function refreshInventories()
-    payment = peripheral.wrap(cfg.payment_side)
-    storage = peripheral.wrap(cfg.storage_side)
-
-    paymentName = payment and peripheral.getName(payment) or nil
-    storageName = storage and peripheral.getName(storage) or nil
-
-    if payment and
-       (type(payment.list) ~= "function" or
-        type(payment.pushItems) ~= "function") then
-        payment, paymentName = nil, nil
-    end
-
-    if storage and
-       (type(storage.list) ~= "function" or
-        type(storage.pushItems) ~= "function") then
-        storage, storageName = nil, nil
-    end
-end
-
--- ============================================================
--- MONEDAS
--- ============================================================
-
-local function normalizeItemID(value)
-    if type(value) ~= "string" then return "" end
-    return value:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-end
-
-local function isFuelToken(item)
-    if type(item) ~= "table" then return false end
-
-    local id = normalizeItemID(item.name)
-    if id == normalizeItemID(cfg.token_item_id) then return true end
-    return id == NETHERITE_COIN_ID
-end
-
-local function autoRepairTokenID()
-    if not payment then return end
-
-    for _, item in pairs(payment.list()) do
-        if normalizeItemID(item.name) == NETHERITE_COIN_ID then
-            if normalizeItemID(cfg.token_item_id) ~= NETHERITE_COIN_ID then
-                cfg.token_item_id = NETHERITE_COIN_ID
-                cfg.token_name = "FuelToken"
-                saveConfig()
-            end
-            return
-        end
-    end
-end
-
-local function countTokens(inv)
-    if not inv then return 0 end
-
-    local total = 0
-    for _, item in pairs(inv.list()) do
-        if isFuelToken(item) then
-            total = total + item.count
-        end
-    end
-    return total
-end
-
-local function countInvalidItems()
-    if not payment then return 0 end
-
-    local total = 0
-    for _, item in pairs(payment.list()) do
-        if not isFuelToken(item) then
-            total = total + item.count
-        end
-    end
-    return total
-end
-
-local function moveTokens(source, destinationName, amount)
-    if not source or not destinationName or amount <= 0 then return 0 end
-
-    local moved = 0
-
-    for slot, item in pairs(source.list()) do
-        if isFuelToken(item) then
-            local remaining = amount - moved
-            if remaining <= 0 then break end
-
-            local wanted = math.min(item.count, remaining)
-            local ok, quantity = pcall(
-                source.pushItems,
-                destinationName,
-                slot,
-                wanted
-            )
-
-            if not ok then return moved end
-            moved = moved + (quantity or 0)
-        end
-    end
-
-    return moved
-end
-
-local function reserveCredit(amount)
-    refreshInventories()
-
-    if not payment or not storage then return false end
-
-    local moved = moveTokens(payment, storageName, amount)
-    if moved == amount then return true end
-
-    if moved > 0 then
-        moveTokens(storage, paymentName, moved)
-    end
-
-    return false
-end
-
-local function returnChange(amount)
-    refreshInventories()
-    if not payment or not storage then return 0 end
-    return moveTokens(storage, paymentName, amount)
-end
 
 -- ============================================================
 -- VALVULA (AHORA INTERRUPTOR ELECTRICO)
@@ -451,7 +320,6 @@ end
 
 local function drawMain(state)
     state = state or {}
-
     if cfg.out_of_service then
         drawOutOfService()
         return
@@ -459,68 +327,56 @@ local function drawMain(state)
 
     local w, h = term.getSize()
     clear()
-
     if hasColor() then
         fillLine(1, colors.blue)
         centerText(1, cfg.station_name, colors.white, colors.blue)
     else
         centerText(1, cfg.station_name)
     end
-
     centerText(2, cleanID(cfg.station_id) .. " | " .. cleanID(cfg.group_id))
 
     local status = state.status or "ESPERANDO"
     local statusColor = colors.white
-
     if hasColor() then
         if state.running then
             statusColor = colors.lime
-        elseif status:find("ERROR") or status:find("OCUPADO") then
+        elseif status:find("ERROR") then
             statusColor = colors.red
         elseif status == "LISTO" then
             statusColor = colors.yellow
         end
     end
-
     centerText(3, status, statusColor)
 
-    local credit = state.credit or 0
     local served = state.served or 0
-    local cost = state.cost or 0
-    local remaining = math.max(0, credit - cost)
-
-    writeAt(2, 5, "CREDITO")
-    writeAt(16, 5, tostring(credit) .. " FT", colors.yellow)
-
+    local cost = math.ceil(served / cfg.fe_per_token)
+    local totalCost = math.ceil(ledger.total_fe / cfg.fe_per_token)
+    writeAt(2, 5, "SESIONES")
+    writeAt(16, 5, tostring(ledger.sessions), colors.yellow)
     writeAt(2, 6, "SUMINISTRADO")
     writeAt(16, 6, tostring(math.floor(served)) .. " FE", colors.cyan)
-
     writeAt(2, 7, "COSTE")
     writeAt(16, 7, tostring(cost) .. " FT", colors.orange)
-
-    writeAt(2, 8, "RESTANTE")
-    writeAt(16, 8, tostring(remaining) .. " FT", colors.lime)
+    writeAt(2, 8, "TOTAL")
+    writeAt(16, 8, tostring(totalCost) .. " FT", colors.lime)
 
     if state.throughput ~= nil then
         writeAt(2, 10, "MEDIDOR " .. cleanID(cfg.meter_id))
-        writeAt(16, 10, tostring(math.floor(state.throughput)) .. " FE/t")
+        writeAt(16, 10, tostring(math.floor(state.throughput)) .. " FE*")
     end
-
     writeAt(2, 12, "PRECIO")
     writeAt(10, 12, "1 FT = " .. tostring(cfg.fe_per_token) .. " FE")
-
     if state.message then
         local msg = tostring(state.message)
         local maxLen = math.max(1, w - 4)
-
         writeAt(2, h - 4, msg:sub(1, maxLen))
         if #msg > maxLen then
             writeAt(2, h - 3, msg:sub(maxLen + 1, maxLen * 2))
         end
     end
-
-    drawButton(state.running == true, credit > 0)
+    drawButton(state.running == true, state.enabled ~= false)
 end
+
 
 -- ============================================================
 -- ADMIN
@@ -571,34 +427,20 @@ local function promptSide(title, current)
     return current
 end
 
-local function diagnosticCoins()
-    refreshInventories()
+-- Ya no hay barril de pago ni inventario de monedas.
+local function resetLedger()
     clear()
-
-    print("DIAGNOSTICO MONEDAS")
-    print("-------------------")
+    centerText(2, "REINICIAR CONTADOR")
     print("")
-
-    if not payment then
-        print("No encuentro barril.")
-    else
-        local found = false
-
-        for slot, item in pairs(payment.list()) do
-            found = true
-            print("Slot " .. tostring(slot))
-            print(tostring(item.count) .. "x " .. tostring(item.name))
-            print(isFuelToken(item) and "FUELTOKEN VALIDO" or "NO VALIDO")
-            print("")
-        end
-
-        if not found then print("Barril vacio.") end
+    print("Pone total FE y sesiones a 0.")
+    print("Escribe REINICIAR para confirmar")
+    write("> ")
+    if read() == "REINICIAR" then
+        ledger = {total_fe=0, sessions=0}
+        saveLedger()
     end
-
-    print("")
-    print("Pulsa una tecla...")
-    os.pullEvent("key")
 end
+
 
 local function adminOptions()
     return {
@@ -650,22 +492,6 @@ local function adminOptions()
             value=function() return cfg.fe_per_token end,
             edit=function()
                 cfg.fe_per_token = promptNumber("FE por FuelToken", cfg.fe_per_token, 1)
-            end
-        },
-
-        {
-            label="Barril pago",
-            value=function() return cfg.payment_side end,
-            edit=function()
-                cfg.payment_side = promptSide("Barril pago", cfg.payment_side)
-            end
-        },
-
-        {
-            label="Barril almacen",
-            value=function() return cfg.storage_side end,
-            edit=function()
-                cfg.storage_side = promptSide("Barril almacen", cfg.storage_side)
             end
         },
 
@@ -736,12 +562,9 @@ local function adminOptions()
         },
 
         {
-            label="Nombre Relay",
-            value=function() return cfg.relay_name end,
-            edit=function()
-                cfg.relay_name = promptText("NOMBRE RELAY O auto", cfg.relay_name)
-                refreshRelay()
-            end
+            label="Lado medidor",
+            value=function() return "left (fijo)" end,
+            edit=diagnosticRelay
         },
 
         {
@@ -754,15 +577,23 @@ local function adminOptions()
         },
 
         {
+            label="Factor ticks/s",
+            value=function() return cfg.ticks_per_second end,
+            edit=function()
+                cfg.ticks_per_second = promptNumber("Factor estimado ticks/s", cfg.ticks_per_second, 1)
+            end
+        },
+
+        {
             label="Diagnostico Relay",
             value=function() return "ABRIR" end,
             edit=diagnosticRelay
         },
 
         {
-            label="Diagnostico monedas",
-            value=function() return "ABRIR" end,
-            edit=diagnosticCoins
+            label="Reiniciar contador",
+            value=function() return "CONFIRMAR" end,
+            edit=resetLedger
         },
 
         {
@@ -868,9 +699,7 @@ local function adminMenu()
 
                 if option.exit then
                     saveConfig()
-                    refreshInventories()
-                    autoRepairTokenID()
-                        return
+                    return
                 end
 
                 if option.edit then
@@ -880,8 +709,6 @@ local function adminMenu()
 
             elseif a == keys.backspace then
                 saveConfig()
-                refreshInventories()
-                autoRepairTokenID()
                 return
             end
 
@@ -904,160 +731,96 @@ local function adminMenu()
 end
 
 -- ============================================================
--- RELE / LECTURA DIRECTA
+-- SUMINISTRO + CONTADOR IZQUIERDO
 -- ============================================================
-
 local function isStopInput(event, a, b, c)
     if event == "key" and a == keys.f then return true end
     if event == "mouse_click" and buttonClicked(b, c) then return true end
     return false
 end
 
--- ============================================================
-
--- CAMBIO / REPOSTAJE
--- ============================================================
-
-local function finishChange(amount)
-    local pending = amount
-
-    while pending > 0 do
-        local returned = returnChange(pending)
-        pending = pending - returned
-
-        if pending > 0 then
-            drawMain({
-                status="CAMBIO PENDIENTE",
-                credit=0,
-                served=0,
-                cost=0,
-                message="Libera espacio en el barril derecho."
-            })
-
-            sleep(cfg.change_retry_time)
-        end
-    end
-end
-
 local function waitForSampleOrStop()
     local timer = os.startTimer(cfg.sample_time)
-
     while true do
         local event, a, b, c = os.pullEvent()
-
-        if event == "timer" and a == timer then
-            return "sample"
-        end
-
-        if isStopInput(event, a, b, c) then
-            return "stop"
-        end
+        if event == "timer" and a == timer then return "sample" end
+        if isStopInput(event, a, b, c) then return "stop" end
     end
 end
 
-local function refuel(credit)
+local function supplyElectricity()
     if cfg.out_of_service then
         closeValve()
         return
     end
-
     closeValve()
-    local found, relayError = refreshRelay()
+    local found, err = refreshRelay()
     if not found then
-        drawMain({status="ERROR RELAY", credit=credit, message=tostring(relayError)})
-        sleep(2.5)
+        drawMain({status="ERROR RELAY", enabled=false, message=tostring(err)})
+        sleep(2)
+        return
+    end
+    local initial, readError = readRelay()
+    if initial == nil then
+        drawMain({status="ERROR RELAY", enabled=false, message=tostring(readError)})
+        sleep(2)
         return
     end
 
-    -- La medicion NO necesita ordenador de deposito ni rednet
-    local initial, initialError = readRelay()
-    if not initial then
-        drawMain({status="ERROR RELAY", credit=credit, message=tostring(initialError)})
-        sleep(2.5)
-        return
-    end
-
-    -- Reserva de monedas, igual que en el codigo original.
-    if not reserveCredit(credit) then
-        drawMain({status="ERROR PAGO", credit=credit, message="No puedo mover las monedas."})
-        sleep(3)
-        return
-    end
-
-    local served = 0
-    local throughput = 0
-    local noFlow = 0
-    local maxEnergy = credit * cfg.fe_per_token
-    local reason = "FINALIZADO"
+    local served, flow, noFlow = 0, initial, 0
     local startedAt = os.epoch("utc")
-    local lastAt = startedAt
-
-    drawMain({
-        status="SUMINISTRANDO",
-        credit=credit, served=0, cost=0,
-        throughput=throughput, running=true,
-        message="F o boton para detener."
-    })
-
+    local lastAt, lastSave = startedAt, startedAt
+    local reason = "FINALIZADO"
+    ledger.sessions = ledger.sessions + 1
+    saveLedger()
+    drawMain({status="SUMINISTRANDO", served=0, throughput=flow,
+        running=true, message="F o boton para detener."})
     openValve()
 
     while true do
-        -- Mantener lectura tambien cuando el cliente pulsa PARAR:
-        -- antes de cerrar, integrar el ultimo intervalo una vez.
         local action = waitForSampleOrStop()
-        local sampledAt = os.epoch("utc")
-        local rate, readError = readRelay()
-        if not rate then
+        local now = os.epoch("utc")
+        local reading, errorMsg = readRelay()
+        if reading == nil then
             reason = "ERROR RELAY"
             break
         end
-
-        throughput = rate
-        local elapsedTicks = math.max(0, (sampledAt - lastAt) / 1000 * 20)
-        -- Limite defensivo si el servidor se queda congelado/pausado.
-        local maxTicks = math.max(1, cfg.sample_time * 40 + 4)
-        elapsedTicks = math.min(elapsedTicks, maxTicks)
-        lastAt = sampledAt
-        if throughput > cfg.flow_epsilon_fe then
-            served = served + throughput * elapsedTicks
+        flow = reading
+        -- La documentacion dice 'throughput actual en FE', no contador total.
+        -- HIPOTESIS DE CALCULO: lectura aproximadamente por tick.
+        -- Es una estimacion; calibrar el factor en tu version del mod.
+        local deltaSeconds = math.max(0, (now - lastAt) / 1000)
+        deltaSeconds = math.min(deltaSeconds, math.max(0.25, cfg.sample_time * 2))
+        lastAt = now
+        if flow > cfg.flow_epsilon_fe then
+            local fe = flow * deltaSeconds * cfg.ticks_per_second
+            served = served + fe
+            ledger.total_fe = ledger.total_fe + fe
             noFlow = 0
-        elseif (sampledAt - startedAt) / 1000 >= cfg.flow_grace_time then
+        elseif (now - startedAt) / 1000 >= cfg.flow_grace_time then
             noFlow = noFlow + 1
         end
-
-        local cost = math.min(credit, math.ceil(served / cfg.fe_per_token))
-        drawMain({
-            status="SUMINISTRANDO", credit=credit,
-            served=served, cost=cost, throughput=throughput,
-            running=true, message="F o boton para detener."
-        })
-
+        if now - lastSave >= 2000 then
+            saveLedger()
+            lastSave = now
+        end
+        drawMain({status="SUMINISTRANDO", served=served, throughput=flow,
+            running=true, message="F o boton para detener."})
         if action == "stop" then
             reason = "PARADO"
             break
-        elseif served >= maxEnergy then
-            reason = "CREDITO AGOTADO"
-            break
-        elseif cfg.no_flow_limit > 0 and noFlow >= cfg.no_flow_limit then
-            reason = "SUMINISTRO COMPLETADO"
+        end
+        if cfg.no_flow_limit > 0 and noFlow >= cfg.no_flow_limit then
+            reason = "SIN CONSUMO"
             break
         end
     end
-
     closeValve()
-    local cost = math.min(credit, math.ceil(served / cfg.fe_per_token))
-    local change = credit - cost
-    finishChange(change)
-
-    drawMain({
-        status=reason, credit=credit, served=served,
-        cost=cost, throughput=throughput, running=false,
-        message="Cambio: " .. tostring(change) .. " FT"
-    })
+    saveLedger()
+    drawMain({status=reason, served=served, throughput=flow,
+        running=false, message="Coste estimado; sin cobro automatico."})
     sleep(3)
 end
-
--- ============================================================
 
 
 -- ESPERA / MAIN
@@ -1089,100 +852,42 @@ end
 
 local function main()
     loadConfig()
-    -- No se necesita rednet ni un segundo ordenador.
-    refreshInventories()
-    autoRepairTokenID()
-    closeValve()
+    loadLedger()
+    closeValve()  -- cortado al arrancar
     refreshRelay()
-
     while true do
-        refreshInventories()
-        autoRepairTokenID()
-
         if cfg.out_of_service then
             closeValve()
             drawOutOfService()
-
-        elseif not payment then
-            drawMain({
-                status="ERROR BARRIL PAGO",
-                message="No encuentro inventario en " .. cfg.payment_side
-            })
-
-        elseif not storage then
-            drawMain({
-                status="ERROR BARRIL ALMACEN",
-                message="No encuentro inventario en " .. cfg.storage_side
-            })
-
-        elseif not refreshRelay() then
-            closeValve()
-            drawMain({status="ERROR RELAY", message="C para configurar Relay"})
-
         else
-            local credit = countTokens(payment)
-            local invalid = countInvalidItems()
-
-            if credit > 0 then
-                local message =
-                    "Medidor " .. cleanID(cfg.meter_id) ..
-                    " | F o pulsa el boton."
-
-                if invalid > 0 then
-                    message = message .. " Item invalido: " .. tostring(invalid)
-                end
-
-                drawMain({
-                    status="LISTO",
-                    credit=credit,
-                    served=0,
-                    cost=0,
-                    running=false,
-                    message=message
-                })
+            local found, problem = refreshRelay()
+            if not found then
+                closeValve()
+                drawMain({status="ERROR RELAY", enabled=false,
+                    message=tostring(problem)})
             else
-                local message = "Inserta Netherite Coins."
-
-                if invalid > 0 then
-                    message = "Objeto no valido en el barril."
+                local rate, readErr = readRelay()
+                if rate == nil then
+                    closeValve()
+                    drawMain({status="ERROR RELAY", enabled=false,
+                        message=tostring(readErr)})
+                else
+                    drawMain({status="LISTO", throughput=rate, served=0,
+                        message="Medidor izquierdo | F o boton."})
                 end
-
-                drawMain({
-                    status="ESPERANDO PAGO",
-                    credit=0,
-                    served=0,
-                    cost=0,
-                    running=false,
-                    message=message
-                })
             end
         end
-
         local action = waitIdleAction()
-
         if action == "admin" then
+            closeValve()
             adminMenu()
-            refreshInventories()
-            autoRepairTokenID()
-
         elseif action == "start" and not cfg.out_of_service then
-            refreshInventories()
-            autoRepairTokenID()
-
-            local credit = countTokens(payment)
-
-            if credit <= 0 then
-                drawMain({
-                    status="SIN CREDITO",
-                    message="Introduce Netherite Coins."
-                })
-                sleep(1.2)
-            else
-                refuel(credit)
-            end
+            supplyElectricity()
         end
     end
 end
+
+
 
 local ok, err = pcall(main)
 
