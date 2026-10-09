@@ -34,7 +34,7 @@ local function loopCofres()
         local c_in = peripheral.wrap("top")
         local c_out = peripheral.wrap("bottom")
 
-        if c_in and c_out then
+        if c_in and type(c_in.size) == "function" and c_out and type(c_out.size) == "function" then
             for slot = 1, c_in.size() do
                 local item = c_in.getItemDetail(slot)
                 if item and item.displayName == "HIERTORRES" then
@@ -81,7 +81,12 @@ local function loopPantalla()
             term.setTextColor(colors.white)
         end
         
-        term.setCursorPos(1, 8)
+        local c_in = peripheral.wrap("top")
+        local c_out = peripheral.wrap("bottom")
+        if not c_in or type(c_in.size) ~= "function" then term.setTextColor(colors.red); print("\n[!] Falta COFRE ARRIBA") end
+        if not c_out or type(c_out.size) ~= "function" then term.setTextColor(colors.red); print("\n[!] Falta COFRE ABAJO") end
+        
+        term.setCursorPos(1, 12)
         term.setTextColor(colors.gray)
         print("-------------------------")
         print("1 HIERTORRE = 10 creditos (5 min)")
