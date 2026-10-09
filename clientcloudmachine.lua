@@ -29,12 +29,8 @@ local function pantallaLogin()
     end
 end
 
-local function conectar(server_id)
-    local solo_free = true
-    if MY_PLANES["ADMIN"] then solo_free = false end
-    for p, _ in pairs(MY_PLANES) do if not FREE_TYPES[p] and p ~= "FREE" then solo_free = false; break end end
+local function conectar(server_id, solo_free)
     local d_id = solo_free and "Oculto" or server_id
-
     local w, h = term.getSize()
     rednet.send(server_id, {tipo="CONECTAR", w=w, h=h-1, user=USERNAME}, PROTOCOLO)
     local id, msg = rednet.receive(PROTOCOLO, 2)
@@ -72,7 +68,31 @@ local function conectar(server_id)
                 end
             end
         end
-        parallel.waitForAny(bucleInputs, buclePantalla)
+        
+        local function bucleTopBar()
+            local start_time = os.epoch("utc")
+            while true do
+                local now = os.epoch("utc")
+                local left = 180 - math.floor((now - start_time) / 1000)
+                if left < 0 then left = 0 end
+                local m = math.floor(left / 60)
+                local s = left % 60
+                
+                term.redirect(old_term)
+                term.setCursorPos(1, 1)
+                term.setBackgroundColor(colors.gray)
+                term.setTextColor(colors.white)
+                term.clearLine()
+                term.write(string.format(" [X] Salir | Srv: Oculto | User: %s | Quedan: %02d:%02d", USERNAME, m, s))
+                term.setBackgroundColor(colors.black)
+                term.redirect(remote_win)
+                
+                os.sleep(1)
+            end
+        end
+        
+        if solo_free then parallel.waitForAny(bucleInputs, buclePantalla, bucleTopBar)
+        else parallel.waitForAny(bucleInputs, buclePantalla) end
         
         term.redirect(old_term)
         term.setTextColor(colors.white); term.setBackgroundColor(colors.black); term.clear(); term.setCursorPos(1,1); print("Desconectado.")
@@ -92,20 +112,25 @@ local function buscarYConectar(grupo_objetivo)
     print("\nBuscando servidor [" .. grupo_objetivo .. "] ...")
     rednet.broadcast({tipo="BUSCAR", grupo=grupo_objetivo, user_planes=MY_PLANES, user=USERNAME}, PROTOCOLO)
     
-    local t_id = nil; local cooldown_min = nil; local admin_kick_id = nil; local colas = {}
+    local t_id = nil; local cooldown_segs = nil; local admin_kick_id = nil; local colas = {}
     local t = os.startTimer(1.5)
     while true do
         local e, p1, p2, p3 = os.pullEvent()
         if e=="rednet_message" and p3==PROTOCOLO and type(p2)=="table" then
             if p2.tipo=="OFERTA" then if p2.admin_kick then admin_kick_id = p1 end; t_id = p1; break
-            elseif p2.tipo=="ERROR_COOLDOWN" then cooldown_min = p2.min
+            elseif p2.tipo=="ERROR_COOLDOWN" then cooldown_segs = p2.segs
             elseif p2.tipo=="INFO_COLA" then colas[p1] = p2.qlen end
         elseif e == "timer" and p1 == t then break end
     end
     
-    if admin_kick_id then conectar(admin_kick_id)
-    elseif t_id then conectar(t_id)
-    elseif cooldown_min then term.setTextColor(colors.red); print("COOLDOWN: Espera " .. cooldown_min .. " min."); sleep(3)
+    if admin_kick_id then conectar(admin_kick_id, solo_free)
+    elseif t_id then conectar(t_id, solo_free)
+    elseif cooldown_segs then
+        term.setTextColor(colors.red)
+        local m = math.floor(cooldown_segs / 60)
+        local s = cooldown_segs % 60
+        print(string.format("COOLDOWN: Espera %02d:%02d para volver a usar.", m, s))
+        sleep(3)
     elseif next(colas) then
         local best_id, min_q = nil, 9999
         for s_id, qlen in pairs(colas) do if qlen < min_q then best_id = s_id; min_q = qlen end end
@@ -125,7 +150,7 @@ local function buscarYConectar(grupo_objetivo)
                     print("\n(Presiona 'Q' para salir de la cola)")
                 elseif p2.tipo == "OFERTA_COLA" then
                     term.clear(); term.setCursorPos(1,1); term.setTextColor(colors.green)
-                    print("¡Tu turno! Conectando..."); esperando = false; conectar(best_id)
+                    print("¡Tu turno! Conectando..."); esperando = false; conectar(best_id, solo_free)
                 end
             elseif e == "key" and p2 == keys.q then
                 rednet.send(best_id, {tipo="LEAVE_QUEUE"}, PROTOCOLO)
@@ -243,7 +268,7 @@ local function main()
                                     sleep(4); break
                                 else print("Error al reclamar."); sleep(2); break end
                             elseif obj.data.owner == USERNAME then
-                                conectar(obj.id); break
+                                conectar(obj.id, false); break
                             else
                                 term.setTextColor(colors.red); print("No eres el dueño o no está libre."); sleep(2); break
                             end
