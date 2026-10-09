@@ -31,7 +31,6 @@ local function aplicarSandboxGlobal()
     if oldFS.exists(SESSION_DIR) and not oldFS.isDir(SESSION_DIR) then oldFS.delete(SESSION_DIR) end
     if not oldFS.exists(SESSION_DIR) then oldFS.makeDir(SESSION_DIR) end
 
-    -- FIX: Proteccion profunda contra el comando edit
     local oldAttributes = oldFS.attributes
     if oldAttributes then fs.attributes = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldAttributes(path) end local abs = normalizar(path); if abs == SESSION_DIR or abs:sub(1, #SESSION_DIR+1) == SESSION_DIR.."/" or esRomDelSistema(path) then return oldAttributes(path) end return nil, "Acceso denegado" end end
     
@@ -52,8 +51,10 @@ local function aplicarSandboxGlobal()
     fs.isReadOnly = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isReadOnly(path) end if dentroDeLaCarcel(path) then return oldFS.isReadOnly(path) end return true end
     fs.getSize = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.getSize(path) end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.getSize(path) end return 0 end
     
-    os.shutdown = function() local s = getCurrentSession(); if not s or s.perms.os then oldOS.shutdown() else print("Denegado.") end end
-    os.reboot = function() local s = getCurrentSession(); if not s or s.perms.os then oldOS.reboot() else print("Denegado.") end end
+    -- FIX: Reinicios y Apagados Virtuales (Afecta solo a la sesión)
+    os.shutdown = function() local s = getCurrentSession(); if s then error("SHUTDOWN_SESSION", 0) else oldOS.shutdown() end end
+    os.reboot = function() local s = getCurrentSession(); if s then error("REBOOT_SESSION", 0) else oldOS.reboot() end end
+    
     peripheral.find = function(t,...) local s = getCurrentSession(); if s and not s.perms.rednet then if t=="drive" or t=="modem" then return nil end end return oldPeripheral.find(t,...) end
     peripheral.getMethods = function(sd) local s = getCurrentSession(); if s and not s.perms.rednet then local pt=oldPeripheral.getType(sd); if pt=="drive" or pt=="modem" then return nil end end return oldPeripheral.getMethods(sd) end
     peripheral.call = function(sd, m, ...) local s = getCurrentSession(); if s and not s.perms.rednet then local pt=oldPeripheral.getType(sd); if pt=="drive" or pt=="modem" then return nil end end return oldPeripheral.call(sd, m, ...) end
@@ -90,9 +91,19 @@ local function spawnSession(id, msg)
     term_remota.setBackgroundColour = term_remota.setBackgroundColor; term_remota.getCursorPos = function() return win.getCursorPos() end; term_remota.getSize = function() return win.getSize() end
 
     local co = coroutine.create(function()
-        term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
-        term.setTextColor(colors.cyan); print("[ Servidor Dedicado ]"); print(string.rep("-", w)); term.setTextColor(colors.white)
-        pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
+        while true do
+            term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
+            term.setTextColor(colors.cyan); print("[ Servidor Dedicado ]"); print(string.rep("-", w)); term.setTextColor(colors.white)
+            
+            -- FIX: Pcall para atrapar los reinicios/apagados virtuales de la sesion
+            local ok, err = pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
+            
+            if not ok and err == "REBOOT_SESSION" then
+                -- Bucle infinito permite reiniciar la consola limpia
+            else
+                break -- Salir normalmente
+            end
+        end
         oldRednet.send(id, {tipo="DESCONECTAR"}, PROTOCOLO)
     end)
     
