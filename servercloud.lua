@@ -47,7 +47,6 @@ local function aplicarSandboxGlobal()
     if oldFS.exists(SESSION_DIR) and not oldFS.isDir(SESSION_DIR) then oldFS.delete(SESSION_DIR) end
     if not oldFS.exists(SESSION_DIR) then oldFS.makeDir(SESSION_DIR) end
 
-    -- FIX: Proteccion profunda contra el comando edit
     local oldAttributes = oldFS.attributes
     if oldAttributes then fs.attributes = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldAttributes(path) end local abs = normalizar(path); if abs == SESSION_DIR or abs:sub(1, #SESSION_DIR+1) == SESSION_DIR.."/" or esRomDelSistema(path) then return oldAttributes(path) end return nil, "Acceso denegado" end end
     
@@ -68,8 +67,9 @@ local function aplicarSandboxGlobal()
     fs.isReadOnly = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isReadOnly(path) end if dentroDeLaCarcel(path) then return oldFS.isReadOnly(path) end return true end
     fs.getSize = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.getSize(path) end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.getSize(path) end return 0 end
     
-    os.shutdown = function() local s = getCurrentSession(); if not s or s.perms.os then oldOS.shutdown() else print("Denegado.") end end
-    os.reboot = function() local s = getCurrentSession(); if not s or s.perms.os then oldOS.reboot() else print("Denegado.") end end
+    -- FIX: Reinicios y Apagados Virtuales (Afecta solo a la sesión)
+    os.shutdown = function() local s = getCurrentSession(); if s then error("SHUTDOWN_SESSION", 0) else oldOS.shutdown() end end
+    os.reboot = function() local s = getCurrentSession(); if s then error("REBOOT_SESSION", 0) else oldOS.reboot() end end
     
     peripheral.find = function(typ, ...) local s = getCurrentSession(); if s and not s.perms.rednet then if typ == "drive" or typ == "modem" then return nil end end return oldPeripheral.find(typ, ...) end
     peripheral.getMethods = function(sd) local s = getCurrentSession(); if s and not s.perms.rednet then local pt = oldPeripheral.getType(sd); if pt == "drive" or pt == "modem" then return nil end end return oldPeripheral.getMethods(sd) end
@@ -87,7 +87,16 @@ aplicarSandboxGlobal()
 local function enviarActualizacionCola() for i, req in ipairs(cola_espera) do oldRednet.send(req.id, {tipo="QUEUE_UPDATE", pos=i}, PROTOCOLO) end end
 local function ordenarCola() table.sort(cola_espera, function(a, b) if a.premium and not b.premium then return true end if not a.premium and b.premium then return false end return a.time < b.time end) end
 local function tieneAcceso(user, user_planes) if user == "Juesulastudios" then return true end local has = user_planes["ADMIN"] or user_planes[config.plan]; if config.plan == "FREE" then for p, _ in pairs(user_planes) do if db.free_types[p] then has = true; break end end end return has end
-local function enCooldown(user) if user == "Juesulastudios" then return false, 0 end local now = os.epoch("utc"); if db.cuentas[user] and db.cuentas[user].cooldown > now then return true, math.ceil((db.cuentas[user].cooldown - now) / 60000) end return false, 0 end
+
+-- FIX: Modificado a return Segundos para el Temporizador
+local function enCooldown(user)
+    if user == "Juesulastudios" then return false, 0 end
+    local now = os.epoch("utc")
+    if db.cuentas[user] and db.cuentas[user].cooldown > now then
+        return true, math.ceil((db.cuentas[user].cooldown - now) / 1000)
+    end
+    return false, 0
+end
 
 local function procesarGlobalRednet(id, msg)
     if msg.tipo == "LOGIN" then
@@ -138,9 +147,19 @@ local function spawnSession(id, msg)
 
     local p_perms = (msg.user == "Juesulastudios") and {fs=true, rednet=true, http=true, os=true} or config.permisos
     local co = coroutine.create(function()
-        term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
-        term.setTextColor(colors.cyan); print("[ World Shell ]: " .. config.mensaje); print(string.rep("-", w)); term.setTextColor(colors.white)
-        pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
+        while true do
+            term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
+            term.setTextColor(colors.cyan); print("[ World Shell ]: " .. config.mensaje); print(string.rep("-", w)); term.setTextColor(colors.white)
+            
+            -- FIX: Pcall atrapando error("REBOOT_SESSION")
+            local ok, err = pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
+            
+            if not ok and err == "REBOOT_SESSION" then
+                -- Bucle infinito para reiniciar maquina
+            else
+                break -- Salida normal / shutdown
+            end
+        end
         oldRednet.send(id, {tipo="DESCONECTAR"}, PROTOCOLO)
     end)
     
@@ -211,8 +230,8 @@ local function runServerEngine()
                     elseif msg.tipo == "BUSCAR" then
                         local up = msg.user_planes or {["FREE"]=true}
                         if tieneAcceso(msg.user, up) then
-                            local cd, mins = enCooldown(msg.user)
-                            if cd then oldRednet.send(id, {tipo="ERROR_COOLDOWN", min=mins}, PROTOCOLO)
+                            local cd, segs = enCooldown(msg.user)
+                            if cd then oldRednet.send(id, {tipo="ERROR_COOLDOWN", segs=segs}, PROTOCOLO)
                             elseif (msg.grupo == "AUTO" and db.free_types[config.plan]) or (msg.grupo == config.grupo) then
                                 if session_count < max_u then oldRednet.send(id, {tipo="OFERTA", grupo=config.grupo}, PROTOCOLO)
                                 else
