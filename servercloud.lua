@@ -67,7 +67,7 @@ local function aplicarSandboxGlobal()
     fs.isReadOnly = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isReadOnly(path) end if dentroDeLaCarcel(path) then return oldFS.isReadOnly(path) end return true end
     fs.getSize = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.getSize(path) end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.getSize(path) end return 0 end
     
-    -- FIX: Reinicios y Apagados Virtuales (Afecta solo a la sesión)
+    -- Reinicios Virtuales Aislados
     os.shutdown = function() local s = getCurrentSession(); if s then error("SHUTDOWN_SESSION", 0) else oldOS.shutdown() end end
     os.reboot = function() local s = getCurrentSession(); if s then error("REBOOT_SESSION", 0) else oldOS.reboot() end end
     
@@ -88,7 +88,6 @@ local function enviarActualizacionCola() for i, req in ipairs(cola_espera) do ol
 local function ordenarCola() table.sort(cola_espera, function(a, b) if a.premium and not b.premium then return true end if not a.premium and b.premium then return false end return a.time < b.time end) end
 local function tieneAcceso(user, user_planes) if user == "Juesulastudios" then return true end local has = user_planes["ADMIN"] or user_planes[config.plan]; if config.plan == "FREE" then for p, _ in pairs(user_planes) do if db.free_types[p] then has = true; break end end end return has end
 
--- FIX: Modificado a return Segundos para el Temporizador
 local function enCooldown(user)
     if user == "Juesulastudios" then return false, 0 end
     local now = os.epoch("utc")
@@ -151,11 +150,10 @@ local function spawnSession(id, msg)
             term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
             term.setTextColor(colors.cyan); print("[ World Shell ]: " .. config.mensaje); print(string.rep("-", w)); term.setTextColor(colors.white)
             
-            -- FIX: Pcall atrapando error("REBOOT_SESSION")
             local ok, err = pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
             
             if not ok and err == "REBOOT_SESSION" then
-                -- Bucle infinito para reiniciar maquina
+                -- Continúa el bucle reiniciando la maquina limpia
             else
                 break -- Salida normal / shutdown
             end
@@ -185,10 +183,10 @@ local function renderUI()
         print("[<- / ->] Espiar pantallas de Clientes")
         print("[   Q   ] Apagar el Servidor")
     elseif view_mode == "MONITOR" then
+        term.setBackgroundColor(colors.black); term.clear()
         term.setBackgroundColor(colors.gray); term.setTextColor(colors.white); term.setCursorPos(1,1); term.clearLine()
         if session_count == 0 then
             print(" [D] Dashboard | (No hay clientes conectados)"); for _, id in ipairs(session_keys) do active_sessions[id].win.setVisible(false) end
-            term.setBackgroundColor(colors.black); term.setCursorPos(1,2); term.clearToEnd()
         else
             local active_id = session_keys[monitor_index]; local s = active_sessions[active_id]
             print(" [D] Volver | Clientes: " .. monitor_index .. "/" .. session_count .. " | Viendo a: " .. s.user)
