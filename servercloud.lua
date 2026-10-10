@@ -21,6 +21,17 @@ if http then for k, v in pairs(http) do oldHTTP[k] = v end end
 
 os.version = function() return "World Shell 1.0" end
 
+-- FIX: Rastreador de Corrutinas para evitar que sub-procesos (como pastebin o edit) escapen del Sandbox
+local oldCoroutineCreate = coroutine.create
+local co_session_map = setmetatable({}, {__mode = "k"})
+
+coroutine.create = function(f)
+    local c = oldCoroutineCreate(f)
+    local curr = coroutine.running()
+    if curr and co_session_map[curr] then co_session_map[c] = co_session_map[curr] end
+    return c
+end
+
 local function cargarDB()
     if oldFS.exists(DB_FILE) then local f = oldFS.open(DB_FILE, "r"); local data = textutils.unserialize(f.readAll()); f.close(); if data then db = data end end
     if not db.free_types then db.free_types = { ["FREE"] = true } end
@@ -35,11 +46,12 @@ local function abrirModem() local modems = {peripheral.find("modem")}; if #modem
 local function normalizar(path) return oldFS.combine("", path) end
 local function dentroDeLaCarcel(path) local abs = normalizar(path); return abs == SESSION_DIR or abs:sub(1, #SESSION_DIR + 1) == SESSION_DIR .. "/" end
 local function esRomDelSistema(path) local abs = normalizar(path); return abs == "rom" or abs:sub(1, 4) == "rom/" end
-local function esRutaDeArranque(path) local abs = normalizar(path); return abs == "startup" or abs == "startup.lua" or abs:sub(1, 8) == "startup/" end
+local function esRutaProtegida(path) local n = fs.getName(path):lower(); return n == "startup" or n == "startup.lua" end
 
 local function getCurrentSession()
     local co = coroutine.running()
-    for id, s in pairs(active_sessions) do if s.co == co then return s end end
+    local id = co_session_map[co]
+    if id and active_sessions[id] then return active_sessions[id] end
     return nil 
 end
 
@@ -49,27 +61,32 @@ local function aplicarSandboxGlobal()
 
     local oldAttributes = oldFS.attributes
     if oldAttributes then fs.attributes = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldAttributes(path) end local abs = normalizar(path); if abs == SESSION_DIR or abs:sub(1, #SESSION_DIR+1) == SESSION_DIR.."/" or esRomDelSistema(path) then return oldAttributes(path) end return nil, "Acceso denegado" end end
-    
     local oldFind = oldFS.find
     if oldFind then fs.find = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFind(path) end if oldFS.exists(path) then return {path} else return {} end end end
 
     if oldFS.getCapacity then fs.getCapacity = function(path) return oldFS.getCapacity(SESSION_DIR) end end
     if oldFS.getFreeSpace then fs.getFreeSpace = function(path) return oldFS.getFreeSpace(SESSION_DIR) end end
 
-    fs.open = function(path, mode) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.open(path, mode) end; if esRutaDeArranque(path) then return nil, "Acceso denegado" end; if dentroDeLaCarcel(path) then return oldFS.open(path, mode) end; if mode == "r" and esRomDelSistema(path) then return oldFS.open(path, mode) end; return nil, "Acceso denegado (Aislado)" end
-    fs.delete = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.delete(path) end if dentroDeLaCarcel(path) then return oldFS.delete(path) end return false end
-    fs.makeDir = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.makeDir(path) end if dentroDeLaCarcel(path) then return oldFS.makeDir(path) end return false end
-    fs.move = function(p1, p2) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.move(p1, p2) end if dentroDeLaCarcel(p1) and dentroDeLaCarcel(p2) then return oldFS.move(p1, p2) end return false end
-    fs.copy = function(p1, p2) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.copy(p1, p2) end if (dentroDeLaCarcel(p1) or esRomDelSistema(p1)) and dentroDeLaCarcel(p2) then return oldFS.copy(p1, p2) end return false end
-    fs.list = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.list(path) end local abs = normalizar(path); if abs == "" then return { SESSION_DIR, "rom" } end if esRutaDeArranque(path) then return {} end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.list(path) end return {} end
-    fs.exists = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.exists(path) end local abs = normalizar(path); if abs == "" then return true end if esRutaDeArranque(path) then return false end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.exists(path) end return false end
-    fs.isDir = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isDir(path) end local abs = normalizar(path); if abs == "" then return true end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.isDir(path) end return false end
+    fs.open = function(path, mode) 
+        local s = getCurrentSession()
+        if not s or s.perms.fs then return oldFS.open(path, mode) end
+        if mode ~= "r" and esRutaProtegida(path) then return nil, "No se puede editar scripts de arranque." end
+        if dentroDeLaCarcel(path) then return oldFS.open(path, mode) end
+        if mode == "r" and esRomDelSistema(path) then return oldFS.open(path, mode) end
+        return nil, "Acceso denegado (Aislado)" 
+    end
+    fs.delete = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.delete(path) end; if esRutaProtegida(path) then return false end; if dentroDeLaCarcel(path) then return oldFS.delete(path) end return false end
+    fs.makeDir = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.makeDir(path) end; if esRutaProtegida(path) then return false end; if dentroDeLaCarcel(path) then return oldFS.makeDir(path) end return false end
+    fs.move = function(p1, p2) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.move(p1, p2) end; if esRutaProtegida(p1) or esRutaProtegida(p2) then return false end; if dentroDeLaCarcel(p1) and dentroDeLaCarcel(p2) then return oldFS.move(p1, p2) end return false end
+    fs.copy = function(p1, p2) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.copy(p1, p2) end; if esRutaProtegida(p2) then return false end; if (dentroDeLaCarcel(p1) or esRomDelSistema(p1)) and dentroDeLaCarcel(p2) then return oldFS.copy(p1, p2) end return false end
+    fs.list = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.list(path) end local abs = normalizar(path); if abs == "" then return { SESSION_DIR, "rom" } end; if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.list(path) end return {} end
+    fs.exists = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.exists(path) end local abs = normalizar(path); if abs == "" then return true end; if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.exists(path) end return false end
+    fs.isDir = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isDir(path) end local abs = normalizar(path); if abs == "" then return true end; if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.isDir(path) end return false end
     fs.isReadOnly = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.isReadOnly(path) end if dentroDeLaCarcel(path) then return oldFS.isReadOnly(path) end return true end
     fs.getSize = function(path) local s = getCurrentSession(); if not s or s.perms.fs then return oldFS.getSize(path) end if dentroDeLaCarcel(path) or esRomDelSistema(path) then return oldFS.getSize(path) end return 0 end
     
-    -- Reinicios Virtuales Aislados
-    os.shutdown = function() local s = getCurrentSession(); if s then error("SHUTDOWN_SESSION", 0) else oldOS.shutdown() end end
-    os.reboot = function() local s = getCurrentSession(); if s then error("REBOOT_SESSION", 0) else oldOS.reboot() end end
+    os.shutdown = function() local s = getCurrentSession(); if s then coroutine.yield("VIRTUAL_SHUTDOWN") else oldOS.shutdown() end end
+    os.reboot = function() local s = getCurrentSession(); if s then coroutine.yield("VIRTUAL_REBOOT") else oldOS.reboot() end end
     
     peripheral.find = function(typ, ...) local s = getCurrentSession(); if s and not s.perms.rednet then if typ == "drive" or typ == "modem" then return nil end end return oldPeripheral.find(typ, ...) end
     peripheral.getMethods = function(sd) local s = getCurrentSession(); if s and not s.perms.rednet then local pt = oldPeripheral.getType(sd); if pt == "drive" or pt == "modem" then return nil end end return oldPeripheral.getMethods(sd) end
@@ -114,7 +131,7 @@ end
 local function endSession(id)
     if active_sessions[id] then
         oldRednet.send(id, {tipo="DESCONECTAR"}, PROTOCOLO)
-        active_sessions[id].win.setVisible(false)
+        if active_sessions[id].win then active_sessions[id].win.setVisible(false) end
         if db.free_types[config.plan] and active_sessions[id].user ~= "Juesulastudios" then
             db.cuentas[active_sessions[id].user].cooldown = os.epoch("utc") + 300000; guardarDB(); oldRednet.broadcast({tipo="SET_DB", db=db}, PROTOCOLO)
         end
@@ -131,7 +148,14 @@ local function resumeSession(id, ev_data)
     term.redirect(s.term_remota)
     local ok, filt = coroutine.resume(s.co, table.unpack(ev_data))
     term.redirect(old_t)
-    if ok then if coroutine.status(s.co) == "dead" then endSession(id) end else endSession(id) end
+    
+    if ok then 
+        if filt == "VIRTUAL_REBOOT" or filt == "VIRTUAL_SHUTDOWN" then endSession(id)
+        else
+            s.filter = filt
+            if coroutine.status(s.co) == "dead" then endSession(id) end 
+        end
+    else endSession(id) end
 end
 
 local function spawnSession(id, msg)
@@ -145,36 +169,30 @@ local function spawnSession(id, msg)
     term_remota.getCursorPos = function() return win.getCursorPos() end; term_remota.getSize = function() return win.getSize() end
 
     local p_perms = (msg.user == "Juesulastudios") and {fs=true, rednet=true, http=true, os=true} or config.permisos
-    local co = coroutine.create(function()
-        while true do
-            term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
-            term.setTextColor(colors.cyan); print("[ World Shell ]: " .. config.mensaje); print(string.rep("-", w)); term.setTextColor(colors.white)
-            
-            local ok, err = pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
-            
-            if not ok and err == "REBOOT_SESSION" then
-                -- Continúa el bucle reiniciando la maquina limpia
-            else
-                break -- Salida normal / shutdown
-            end
-        end
-        oldRednet.send(id, {tipo="DESCONECTAR"}, PROTOCOLO)
+    local co = oldCoroutineCreate(function()
+        term.setBackgroundColor(colors.blue); term.setTextColor(colors.white); term.clear(); term.setCursorPos(1,1)
+        term.setTextColor(colors.cyan); print("[ World Shell ]: " .. config.mensaje); print(string.rep("-", w)); term.setTextColor(colors.white)
+        pcall(function() if #config.comandos == 0 then shell.run("shell") else for _, cmd in ipairs(config.comandos) do shell.run(cmd) end; shell.run("shell") end end)
     end)
+    co_session_map[co] = id
     
     active_sessions[id] = { co = co, win = win, term_remota = term_remota, user = msg.user, is_free = db.free_types[config.plan], expire_time = os.epoch("utc") + 180000, filter = nil, perms = p_perms }
     table.insert(session_keys, id); session_count = session_count + 1
     
     local old_t = term.current()
     term.redirect(term_remota)
-    local ok = coroutine.resume(co)
+    local ok, filt = coroutine.resume(co)
     term.redirect(old_t)
-    if not ok then endSession(id) end
+    
+    if ok then
+        if filt == "VIRTUAL_REBOOT" or filt == "VIRTUAL_SHUTDOWN" then endSession(id) end
+    else endSession(id) end
 end
 
 local function renderUI()
     term.redirect(term.native())
     if view_mode == "DASHBOARD" then
-        for _, id in ipairs(session_keys) do active_sessions[id].win.setVisible(false) end
+        for _, id in ipairs(session_keys) do if active_sessions[id] and active_sessions[id].win then active_sessions[id].win.setVisible(false) end end
         term.setBackgroundColor(colors.black); term.clear(); term.setCursorPos(1,1); term.setTextColor(colors.cyan)
         print("=== SERVIDOR WORLD SHELL ==="); term.setTextColor(colors.white)
         print("ID: " .. os.getComputerID() .. " | Grupo: " .. config.grupo .. " | Plan: " .. config.plan)
@@ -186,11 +204,13 @@ local function renderUI()
         term.setBackgroundColor(colors.black); term.clear()
         term.setBackgroundColor(colors.gray); term.setTextColor(colors.white); term.setCursorPos(1,1); term.clearLine()
         if session_count == 0 then
-            print(" [D] Dashboard | (No hay clientes conectados)"); for _, id in ipairs(session_keys) do active_sessions[id].win.setVisible(false) end
+            print(" [D] Dashboard | (No hay clientes conectados)"); for _, id in ipairs(session_keys) do if active_sessions[id] and active_sessions[id].win then active_sessions[id].win.setVisible(false) end end
         else
             local active_id = session_keys[monitor_index]; local s = active_sessions[active_id]
-            print(" [D] Volver | Clientes: " .. monitor_index .. "/" .. session_count .. " | Viendo a: " .. s.user)
-            for _, id in ipairs(session_keys) do active_sessions[id].win.setVisible(id == active_id) end
+            if s then
+                print(" [D] Volver | Clientes: " .. monitor_index .. "/" .. session_count .. " | Viendo a: " .. s.user)
+                for _, id in ipairs(session_keys) do if active_sessions[id] and active_sessions[id].win then active_sessions[id].win.setVisible(id == active_id) end end
+            end
         end
     end
 end
