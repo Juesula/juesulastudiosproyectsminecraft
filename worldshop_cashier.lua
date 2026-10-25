@@ -1,98 +1,6 @@
--- WorldShop 3.0 | Cajero de monedas fisicas Lightman's Currency
--- Requiere dos inventarios conectados por modems CON CABLE: entrada y caja fuerte.
-local P,HOST='worldshop.v1','worldshop'
-local CFG='worldshop_cashier.cfg'
-local JOURNAL='worldshop_cashier_pending'
-local function save(path,obj)
-  local h=assert(fs.open(path,'w'));h.write(textutils.serialize(obj));h.close()
-end
-local function load(path)
-  if not fs.exists(path) then return nil end
-  local h=fs.open(path,'r');local data=textutils.unserialize(h.readAll());h.close();return data
-end
-local modems=0
-for _,n in ipairs(peripheral.getNames()) do
-  if peripheral.hasType(n,'modem') then rednet.open(n);modems=modems+1 end
-end
-if modems==0 then printError('Conecta un modem');return end
-local coins={
-  ['lightmanscurrency:coin_copper']=1,
-  ['lightmanscurrency:coin_iron']=10,
-  ['lightmanscurrency:coin_gold']=100,
-  ['lightmanscurrency:coin_emerald']=1000,
-  ['lightmanscurrency:coin_diamond']=10000,
-  ['lightmanscurrency:coin_netherite']=100000,
-}
-local function inventoryList()
-  print('Inventarios visibles (tienen que estar conectados por cable):')
-  for _,name in ipairs(peripheral.getNames()) do
-    if peripheral.hasType(name,'inventory') then print(' - '..name) end
-  end
-end
-local conf=load(CFG)
-if not conf then
-  print('=== WorldShop / Configurar Cajero ===')
-  print('Desde el servidor: opcion [C]ajero. Autoriza')
-  print('este computer ID ('..os.getComputerID()..') y copia la clave.')
-  write('Clave secreta: ');local secret=read('*')
-  inventoryList()
-  print('BARRIL EN LA DERECHA: entrada de monedas.')
-  print('BARRIL ABAJO: boveda de almacenamiento.')
-  print('Para usar pushItems, conecta ambos barriles por modems con CABLE.')
-  local function autodetect(side)
-    if peripheral.isPresent(side) and peripheral.hasType(side,'inventory') then return side end
-    return nil
-  end
-  write('Nombre periferico BARRIL DERECHO (entrada): ')
-  local inp=read();if inp=='' then inp=autodetect('right') or '' end
-  write('Nombre periferico BARRIL ABAJO (almacen): ')
-  local vault=read();if vault=='' then vault=autodetect('bottom') or '' end
-  if inp=='' or vault=='' then printError('Debes identificar los barriles de la red');return end
-  conf={key=secret,input=inp,vault=vault,coins=coins}
-  save(CFG,conf)
-end
-local function inventory(name)
-  if not peripheral.isPresent(name) or not peripheral.hasType(name,'inventory') then return nil end
-  return peripheral.wrap(name)
-end
-if conf.input==conf.vault then printError('Los dos inventarios deben ser distintos');return end
-local seq=0;math.randomseed((os.epoch('utc')+os.getComputerID())%2147483647)
-local server=rednet.lookup(P,HOST)
-local function rpc(op,content)
-  if not server then server=rednet.lookup(P,HOST) end
-  if not server then return {ok=false,error='Servidor WorldShop no encontrado'} end
-  seq=seq+1
-  local id=tostring(os.getComputerID())..'-'..os.epoch('utc')..'-'..seq..'-'..math.random(10000,99999)
-  content=content or {};content.v=1;content.op=op;content.req=id;content.key=conf.key
-  for _=1,3 do
-    rednet.send(server,content,P)
-    local deadline=os.epoch('utc')+4000
-    repeat
-      local sid,r=rednet.receive(P,math.max(0,(deadline-os.epoch('utc'))/1000))
-      if not sid then break end
-      if sid==server and type(r)=='table' and r.req==id and r.v==1 then return r end
-    until os.epoch('utc')>=deadline
-  end
-  return {ok=false,error='No responde el servidor'}
-end
-local pending=load(JOURNAL) or {}
-local auth=nil;local loginName=nil;local loginBalance=0
-local function syncPending()
-  if #pending==0 then return end
-  print('Enviando '..#pending..' deposito(s) pendientes...')
-  for i=#pending,1,-1 do
-    local t=pending[i]
-    local r=rpc('ATM_CREDIT',{code=t.code,auth=t.auth,tx=t.id,amount=t.amount})
-    if r.ok then
-      print('Confirmado: '..t.user..' +'..t.amount..' WS$')
-      if loginName==t.user then loginBalance=r.balance or (loginBalance+t.amount) end
-      table.remove(pending,i);save(JOURNAL,pending)
-    else printError('Pendiente '..t.id..': '..tostring(r.error)) end
-  end
-end
-local function deposits()
+  if not barrelsReady() and not configureBarrels() then return end
   local inp,vault=inventory(conf.input),inventory(conf.vault)
-  if not inp or not vault then printError('No se encuentran los cofres/perifericos; revisa los cables.');return end
+  if not inp or not vault then printError('No se encuentran los barriles; revisa los cables.');return end
   if #pending>0 then syncPending();if #pending>0 then printError('Resuelve los depositos pendientes primero.');return end end
   if not auth or not loginName then printError('Primero inicia sesion desde el panel');return end
   print('Cuenta: @'..loginName)
@@ -155,18 +63,18 @@ local function dashboard()
   local w,h=term.getSize()
   term.setBackgroundColor(colors.black);term.clear()
   label(1,'  WS  WORLDSHOP  |  CAJERO',colors.white,colors.blue)
-  label(2,'  ID '..os.getComputerID()..'   LIGHTMAN CURRENCY',colors.white,colors.gray)
+  label(2,'  ID '..os.getComputerID()..(paired and '  * CONECTADO' or '  * ENLACE PENDIENTE'),colors.white,colors.gray)
   label(4,loginName and ('  SESION: @'..loginName..'  |  '..loginBalance..' WS$') or '  SIN SESION INICIADA',loginName and colors.lime or colors.orange)
   label(6,'  [BARRIL DERECHA]  INGRESAR MONEDAS',colors.white,colors.green)
-  label(7,'  '..conf.input,colors.lightGray)
+  label(7,'  '..(conf.input or 'Pendiente de calibrar'),colors.lightGray)
   label(9,'  [BARRIL ABAJO]    GUARDAR MONEDAS',colors.white,colors.blue)
-  label(10,'  '..conf.vault,colors.lightGray)
+  label(10,'  '..(conf.vault or 'Pendiente de calibrar'),colors.lightGray)
   label(12,'  PENDIENTES: '..#pending..'  |  [1] INGRESAR',colors.yellow)
   label(13,'  [2] Iniciar sesion / Cambiar usuario',colors.white)
   label(14,'  [3] Reintentar ingreso pendiente',colors.white)
-  if h>=18 then label(16,'  [4] Monedas  [5] Lista  [6] Barriles',colors.cyan) end
+  if h>=18 then label(16,'  [4] Monedas [5] Lista [6] Calibrar',colors.cyan) end
   label(h-1,'  [0] Apagar   |   Click en opciones',colors.lightGray,colors.gray)
-  label(h,'  World Studios  *  WorldShop ATM 3.0',colors.white,colors.blue)
+  label(h,'  World Studios  *  WorldShop ATM 3.1',colors.white,colors.blue)
   while true do
     local ev,a,x,y=os.pullEvent()
     if ev=='monitor_touch' then ev,a,x,y='mouse_click',1,x,y end
@@ -190,16 +98,23 @@ while true do
   elseif c=='5' then inventoryList()
   elseif c=='6' then
     inventoryList()
-    print('Barril DERECHO: '..conf.input)
-    write('Nuevo nombre de entrada (ENTER conservar): ');local name=read()
-    if name~='' then conf.input=name end
-    print('Barril ABAJO: '..conf.vault)
-    write('Nuevo nombre de boveda (ENTER conservar): ');name=read()
-    if name~='' then conf.vault=name end
-    if conf.input==conf.vault then printError('Entrada y boveda no pueden ser iguales')
-    else save(CFG,conf);print('Configuracion guardada') end
+    print('BARRIL DERECHO = entrada; BARRIL ABAJO = boveda.')
+    print('Pulsa ENTER para detectar/calibrar automaticamente.')
+    print('Escribe M para configurar nombres a mano (avanzado).')
+    local mode=(read() or ''):lower()
+    if mode=='m' then
+      write('Nombre periferico BARRIL DERECHO: ');local inp=read()
+      write('Nombre periferico BARRIL ABAJO: ');local vault=read()
+      if useBarrels(inp,vault) then print('Configuracion guardada')
+      else printError('Perifericos incorrectos o identicos') end
+    else
+      -- Fuerza una nueva identificacion si el usuario ha cambiado cables.
+      conf.input=nil;conf.vault=nil
+      configureBarrels()
+    end
   end
   if c~='0' then
     print('');term.setTextColor(colors.lightGray);print('Pulsa ENTER para volver al panel...');read()
   end
 end
+
