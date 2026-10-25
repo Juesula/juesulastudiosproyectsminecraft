@@ -551,7 +551,14 @@ local function process(sender,q)
     table.sort(files,function(a,b)return a.path<b.path end)
     if not up.gameId then
       db.games[gameId]={id=gameId,title=up.title,desc=up.desc,genre=up.genre,price=up.price,
-        owner=acc.name,entry=up.entry,files=files,status='pending',created=now(),deployments={}}
+        owner=acc.name,entry=up.entry,files=(function()
+          -- No reutilizar la tabla files del deployment: textutils.serialize rechaza referencias repetidas.
+          local copy={}
+          for i,f in ipairs(files) do
+            copy[i]={path=f.path,size=f.size,checksum=f.checksum}
+          end
+          return copy
+        end)(),status='pending',created=now(),deployments={}}
       db.nextGame=gameId+1
     end
     local g=db.games[gameId]
