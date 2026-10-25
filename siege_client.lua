@@ -1,8 +1,198 @@
--- SIEGE PROTOCOL / cliente CC:Tweaked (motor WorldTor)
--- Instala worldtor_engine.lua en la MISMA carpeta que este archivo.
+-- SIEGE PROTOCOL v1.0.2 / cliente CC:Tweaked (WorldTor autoinstalable)
+-- Autoinstala worldtor_engine.lua en la carpeta del juego si falta.
 local enginePath=fs.combine(fs.getDir(shell.getRunningProgram()),'worldtor_engine.lua')
+if not fs.exists(enginePath) then
+  local h=fs.open(enginePath,'w')
+  if not h then error('No se puede escribir worldtor_engine.lua en la carpeta del juego') end
+  h.write([==[
+-- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
+-- API: loadfile('worldtor_engine.lua')() -> tabla WorldTor
+-- Componentes: doble buffer, sprites, texto, figuras, camara, efectos, animacion intro y sonido.
+local WT = { version = '1.0.0' }
+local palette = '0123456789abcdef'
+local fallbackColors = {
+    [colors.white]='0', [colors.orange]='1', [colors.magenta]='2',
+    [colors.lightBlue]='3', [colors.yellow]='4', [colors.lime]='5',
+    [colors.pink]='6', [colors.gray]='7', [colors.lightGray]='8',
+    [colors.cyan]='9', [colors.purple]='a', [colors.blue]='b',
+    [colors.brown]='c', [colors.green]='d', [colors.red]='e', [colors.black]='f'
+}
+local function hex(c)
+    if type(c)=='string' then
+        if #c==1 and palette:find(c,1,true) then return c end
+        return '0'
+    end
+    return fallbackColors[c] or '0'
+end
+WT.hex = hex
+local function clamp(x,a,b) return math.min(b,math.max(a,x)) end
+WT.clamp = clamp
+function WT.distance(x1,y1,x2,y2) return math.sqrt((x2-x1)^2+(y2-y1)^2) end
+function WT.hit(a,b,r) return WT.distance(a.x,a.y,b.x,b.y) <= (r or 1) end
+function WT.tween(a,b,t) t=clamp(t,0,1); return a+(b-a)*t end
+
+function WT.new(target)
+    local self = { target=target or term.current(), cameraX=0, cameraY=0,
+                   particles={}, frame=0, shakeTime=0, shakeSize=1 }
+    function self:resize()
+        self.w,self.h=self.target.getSize()
+        self:clear()
+    end
+    function self:clear(ch,fg,bg)
+        self.chars,self.fore,self.back={}, {}, {}
+        ch=(ch or ' '):sub(1,1); fg=hex(fg or colors.white); bg=hex(bg or colors.black)
+        for y=1,self.h do
+            self.chars[y]={};self.fore[y]={};self.back[y]={}
+            for x=1,self.w do self.chars[y][x]=ch;self.fore[y][x]=fg;self.back[y][x]=bg end
+        end
+    end
+    function self:camera(x,y) self.cameraX=x or 0;self.cameraY=y or 0 end
+    function self:pixel(x,y,ch,fg,bg,screen)
+        if not screen then x=x-self.cameraX; y=y-self.cameraY end
+        x=math.floor(x+0.5);y=math.floor(y+0.5)
+        if x<1 or x>self.w or y<1 or y>self.h then return end
+        self.chars[y][x]=(tostring(ch or ' ')):sub(1,1)
+        if fg~=nil then self.fore[y][x]=hex(fg) end
+        if bg~=nil then self.back[y][x]=hex(bg) end
+    end
+    function self:text(x,y,str,fg,bg,screen)
+        local cx,cy=x,y
+        str=tostring(str or '')
+        for i=1,#str do
+            local ch=str:sub(i,i)
+            if ch=='\n' then cy=cy+1;cx=x else self:pixel(cx,cy,ch,fg,bg,screen);cx=cx+1 end
+        end
+    end
+    function self:center(y,str,fg,bg)
+        str=tostring(str or '')
+        self:text(math.floor((self.w-#str)/2)+1,y,str,fg,bg,true)
+    end
+    function self:rect(x,y,w,h,ch,fg,bg,filled)
+        w=math.floor(w);h=math.floor(h)
+        if w<=0 or h<=0 then return end
+        for j=0,h-1 do for i=0,w-1 do
+            if filled or i==0 or i==w-1 or j==0 or j==h-1 then
+                self:pixel(x+i,y+j,ch or '#',fg,bg)
+            end
+        end end
+    end
+    function self:line(x0,y0,x1,y1,ch,fg,bg)
+        x0=math.floor(x0+0.5); y0=math.floor(y0+0.5)
+        x1=math.floor(x1+0.5); y1=math.floor(y1+0.5)
+        local dx=math.abs(x1-x0); local sx=x0<x1 and 1 or -1
+        local dy=-math.abs(y1-y0);local sy=y0<y1 and 1 or -1; local err=dx+dy
+        for _=1,512 do
+            self:pixel(x0,y0,ch or '.',fg,bg)
+            if x0==x1 and y0==y1 then break end
+            local e2=2*err
+            if e2>=dy then err=err+dy;x0=x0+sx end
+            if e2<=dx then err=err+dx;y0=y0+sy end
+        end
+    end
+    function self:circle(cx,cy,r,ch,fg,bg,filled)
+        r=math.max(0,math.floor(r));
+        for y=-r,r do for x=-r,r do
+            local d=x*x+y*y
+            if (filled and d<=r*r) or (not filled and d<=r*r and d>=(r-1)*(r-1)) then
+                self:pixel(cx+x,cy+y,ch or 'o',fg,bg)
+            end
+        end end
+    end
+    -- sprite puede ser {' /\\ ', '<oo>'} o un string multilinea.
+    -- Los espacios se consideran transparentes, salvo transparent=false.
+    function self:sprite(x,y,sprite,fg,bg,transparent)
+        if type(sprite)=='string' then local a={};for row in (sprite..'\n'):gmatch('(.-)\n') do a[#a+1]=row end;sprite=a end
+        if type(sprite)~='table' then return end
+        for dy,row in ipairs(sprite) do for dx=1,#row do
+            local ch=row:sub(dx,dx)
+            if transparent==false or ch~=' ' then self:pixel(x+dx-1,y+dy-1,ch,fg,bg) end
+        end end
+    end
+    function self:bar(x,y,w,value,maxval,col)
+        w=math.max(1,math.floor(w));value=clamp(value or 0,0,maxval or 100)
+        local count=math.floor(w*value/(maxval or 100)+0.5)
+        for i=0,w-1 do self:pixel(x+i,y,(i<count and '=' or '-'),i<count and (col or colors.lime) or colors.gray) end
+    end
+    function self:particle(x,y,ch,fg,vx,vy,life)
+        self.particles[#self.particles+1]={x=x,y=y,c=ch or '*',fg=fg or colors.orange,
+            vx=vx or 0,vy=vy or -0.1,life=life or 8}
+    end
+    function self:burst(x,y,n,fg)
+        for i=1,(n or 8) do
+            local a=(i/(n or 8))*math.pi*2
+            self:particle(x,y,'.',fg,math.cos(a)*0.35,math.sin(a)*0.28,7)
+        end
+    end
+    function self:updateParticles()
+        for i=#self.particles,1,-1 do
+            local p=self.particles[i];p.x=p.x+p.vx;p.y=p.y+p.vy;p.life=p.life-1
+            if p.life<=0 then table.remove(self.particles,i) end
+        end
+    end
+    function self:drawParticles()
+        for _,p in ipairs(self.particles) do self:pixel(p.x,p.y,p.c,p.fg) end
+    end
+    function self:shake(frames,size) self.shakeTime=frames or 4;self.shakeSize=size or 1 end
+    function self:footer()
+        local label='WorldTor IN USE'
+        for x=1,self.w do self:pixel(x,self.h,' ',colors.lightGray,colors.gray,true) end
+        self:center(self.h,label,colors.white,colors.gray)
+    end
+    function self:flip()
+        self.frame=self.frame+1
+        -- Renderiza cada fila con una sola llamada term.blit. Bucle con recorte automatico.
+        local sx,sy=0,0
+        if self.shakeTime>0 then
+            self.shakeTime=self.shakeTime-1
+            sx=math.random(-self.shakeSize,self.shakeSize)
+            sy=math.random(-self.shakeSize,self.shakeSize)
+        end
+        self.target.setCursorBlink(false)
+        for y=1,self.h do
+            -- HUD y marca WorldTor no tiemblan aunque el escenario si.
+            local rowSX,rowSY=sx,sy
+            if y<=2 or y==self.h then rowSX,rowSY=0,0 end
+            local cy=y+rowSY
+            local chars,fore,back={}, {}, {}
+            for x=1,self.w do
+                local cx=x+rowSX
+                if cx>=1 and cx<=self.w and cy>=1 and cy<=self.h then
+                    chars[x]=self.chars[cy][cx];fore[x]=self.fore[cy][cx];back[x]=self.back[cy][cx]
+                else chars[x]=' ';fore[x]='0';back[x]='f' end
+            end
+            self.target.setCursorPos(1,y)
+            self.target.blit(table.concat(chars),table.concat(fore),table.concat(back))
+        end
+    end
+    function self:splash(title,subtitle,speaker,enabled)
+        title=tostring(title or 'WORLD STUDIOS');subtitle=subtitle or 'PRESENTA'
+        local stars={}
+        for i=1,math.min(40,self.w) do stars[i]={x=math.random(1,self.w),y=math.random(2,math.max(2,self.h-2))} end
+        local top=math.max(2,math.floor(self.h/2)-2)
+        for frame=1,math.min(35,#title+19) do
+            self:clear(' ',colors.white,colors.black)
+            for _,st in ipairs(stars) do self:pixel(st.x,st.y,'.',colors.gray,nil,true) end
+            self:center(top,subtitle,colors.lightBlue)
+            self:center(top+2,title:sub(1,math.max(0,frame-3)),frame%4==0 and colors.cyan or colors.white)
+            if self.h>8 then self:center(top+4,'[ '..string.rep('=',math.floor(frame/2))..' ]',colors.cyan) end
+            self:footer();self:flip()
+            if speaker and enabled and frame%4==0 then pcall(speaker.playNote,'bit',0.35,math.min(24,6+frame)) end
+            sleep(0.055)
+        end
+        if speaker and enabled then pcall(speaker.playNote,'chime',0.7,16) end
+        sleep(0.24)
+    end
+    self:resize()
+    return self
+end
+-- Se pueden importar funciones de este motor desde cualquier juego con loadfile().
+return WT
+
+]==])
+  h.close()
+end
 local WT=loadfile(enginePath)
-if not WT then error('Falta worldtor_engine.lua junto a siege_client.lua.') end
+if not WT then error('No se ha podido cargar WorldTor Engine.') end
 local Engine=WT()
 local g=Engine.new(term.current())
 local PROTO='WORLDTOR_SIEGE_V1'
