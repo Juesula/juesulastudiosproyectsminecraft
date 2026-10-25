@@ -1,0 +1,17 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+group = 'dev.autocaravana'
+version = '1.2.0'
+base { archivesName = 'SeatLeash_Bridge_1.21.1' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+neoForge {
+    version = '21.1.235'
+    runs { server { server() } }
+    mods { seatleash_bridge { sourceSet(sourceSets.main) } }
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
