@@ -1,4 +1,4 @@
--- WorldShop 1.0 | Cajero de monedas fisicas Lightman's Currency
+-- WorldShop 3.0 | Cajero de monedas fisicas Lightman's Currency
 -- Requiere dos inventarios conectados por modems CON CABLE: entrada y caja fuerte.
 local P,HOST='worldshop.v1','worldshop'
 local CFG='worldshop_cashier.cfg'
@@ -34,10 +34,20 @@ if not conf then
   print('=== WorldShop / Configurar Cajero ===')
   print('Desde el servidor: opcion [C]ajero. Autoriza')
   print('este computer ID ('..os.getComputerID()..') y copia la clave.')
-  write('Clave secreta: ');local secret=read()
+  write('Clave secreta: ');local secret=read('*')
   inventoryList()
-  write('Inventario de DEPOSITO (ej: minecraft:chest_0): ');local inp=read()
-  write('Inventario CAJA FUERTE (ej: minecraft:chest_1): ');local vault=read()
+  print('BARRIL EN LA DERECHA: entrada de monedas.')
+  print('BARRIL ABAJO: boveda de almacenamiento.')
+  print('Para usar pushItems, conecta ambos barriles por modems con CABLE.')
+  local function autodetect(side)
+    if peripheral.isPresent(side) and peripheral.hasType(side,'inventory') then return side end
+    return nil
+  end
+  write('Nombre periferico BARRIL DERECHO (entrada): ')
+  local inp=read();if inp=='' then inp=autodetect('right') or '' end
+  write('Nombre periferico BARRIL ABAJO (almacen): ')
+  local vault=read();if vault=='' then vault=autodetect('bottom') or '' end
+  if inp=='' or vault=='' then printError('Debes identificar los barriles de la red');return end
   conf={key=secret,input=inp,vault=vault,coins=coins}
   save(CFG,conf)
 end
@@ -66,14 +76,16 @@ local function rpc(op,content)
   return {ok=false,error='No responde el servidor'}
 end
 local pending=load(JOURNAL) or {}
+local auth=nil;local loginName=nil;local loginBalance=0
 local function syncPending()
   if #pending==0 then return end
   print('Enviando '..#pending..' deposito(s) pendientes...')
   for i=#pending,1,-1 do
     local t=pending[i]
-    local r=rpc('ATM_CREDIT',{code=t.code,tx=t.id,amount=t.amount})
+    local r=rpc('ATM_CREDIT',{code=t.code,auth=t.auth,tx=t.id,amount=t.amount})
     if r.ok then
       print('Confirmado: '..t.user..' +'..t.amount..' WS$')
+      if loginName==t.user then loginBalance=r.balance or (loginBalance+t.amount) end
       table.remove(pending,i);save(JOURNAL,pending)
     else printError('Pendiente '..t.id..': '..tostring(r.error)) end
   end
@@ -82,10 +94,8 @@ local function deposits()
   local inp,vault=inventory(conf.input),inventory(conf.vault)
   if not inp or not vault then printError('No se encuentran los cofres/perifericos; revisa los cables.');return end
   if #pending>0 then syncPending();if #pending>0 then printError('Resuelve los depositos pendientes primero.');return end end
-  write('Codigo del ticket WorldShop: ');local code=read()
-  local check=rpc('ATM_VERIFY',{code=code})
-  if not check.ok then printError(check.error);return end
-  print('Cuenta: '..check.user)
+  if not auth or not loginName then printError('Primero inicia sesion desde el panel');return end
+  print('Cuenta: @'..loginName)
   print('Introduce MONEDAS en el cofre de entrada.')
   print('El cofre de la caja fuerte debe estar protegido.')
   print('Tras contar y confirmar, se moveran fisicamente.')
@@ -115,32 +125,81 @@ local function deposits()
   if moved<=0 then printError('No se movieron monedas; saldo sin cambios');return end
   local tx=tostring(os.getComputerID())..'-'..tostring(os.epoch('utc'))..'-'..math.random(10000,99999)
   -- Se guarda el recibo antes de solicitar saldo. Reintentos son idempotentes.
-  pending[#pending+1]={id=tx,code=code,user=check.user,amount=moved}
+  pending[#pending+1]={id=tx,auth=auth,user=loginName,amount=moved}
   save(JOURNAL,pending)
+  auth=nil -- Cada autorizacion es para un solo deposito.
   print('Transferidas monedas por '..moved..' WS$.')
   syncPending()
   if #pending==0 then print('DEPOSITO COMPLETADO.') else printError('Dinero almacenado, credito PENDIENTE. Guarda este ordenador.') end
 end
+local function login()
+  term.setBackgroundColor(colors.black);term.clear()
+  term.setTextColor(colors.cyan);print('     WORLDSHOP / ACCESO AL CAJERO')
+  term.setTextColor(colors.white)
+  print('');write('Usuario WorldShop: ');local name=(read() or ''):lower()
+  if name=='' then return false end
+  write('Contrasena: ');local pass=read('*')
+  local r=rpc('ATM_LOGIN',{user=name,pass=pass})
+  pass=nil
+  if not r.ok then printError('Acceso denegado: '..tostring(r.error));return false end
+  loginName=r.user;auth=r.auth;loginBalance=r.balance or 0
+  return true
+end
+local function label(y,str,fg,bg)
+  local w,h=term.getSize();if y<1 or y>h then return end
+  term.setBackgroundColor(bg or colors.black);term.setTextColor(fg or colors.white)
+  term.setCursorPos(1,y);str=tostring(str or '')
+  term.write(str:sub(1,w)..(' '):rep(math.max(0,w-#str)))
+end
+local function dashboard()
+  local w,h=term.getSize()
+  term.setBackgroundColor(colors.black);term.clear()
+  label(1,'  WS  WORLDSHOP  |  CAJERO',colors.white,colors.blue)
+  label(2,'  ID '..os.getComputerID()..'   LIGHTMAN CURRENCY',colors.white,colors.gray)
+  label(4,loginName and ('  SESION: @'..loginName..'  |  '..loginBalance..' WS$') or '  SIN SESION INICIADA',loginName and colors.lime or colors.orange)
+  label(6,'  [BARRIL DERECHA]  INGRESAR MONEDAS',colors.white,colors.green)
+  label(7,'  '..conf.input,colors.lightGray)
+  label(9,'  [BARRIL ABAJO]    GUARDAR MONEDAS',colors.white,colors.blue)
+  label(10,'  '..conf.vault,colors.lightGray)
+  label(12,'  PENDIENTES: '..#pending..'  |  [1] INGRESAR',colors.yellow)
+  label(13,'  [2] Iniciar sesion / Cambiar usuario',colors.white)
+  label(14,'  [3] Reintentar ingreso pendiente',colors.white)
+  if h>=18 then label(16,'  [4] Monedas  [5] Lista  [6] Barriles',colors.cyan) end
+  label(h-1,'  [0] Apagar   |   Click en opciones',colors.lightGray,colors.gray)
+  label(h,'  World Studios  *  WorldShop ATM 3.0',colors.white,colors.blue)
+  while true do
+    local ev,a,x,y=os.pullEvent()
+    if ev=='monitor_touch' then ev,a,x,y='mouse_click',1,x,y end
+    if ev=='char' and a:match('[0-6]') then return a
+    elseif ev=='mouse_click' then
+      if y==12 then return '1' elseif y==13 then return '2'
+      elseif y==14 then return '3' elseif y==16 then return x<w/3 and '4' or (x<2*w/3 and '5' or '6')
+      elseif y==h-1 then return '0' end
+    end
+  end
+end
 while true do
-  term.setBackgroundColor(colors.black);term.setTextColor(colors.white);term.clear()
-  print('==============================')
-  term.setTextColor(colors.cyan);print('       WORLDSHOP BANK')
-  term.setTextColor(colors.white);print('==============================')
-  print('ID de cajero: '..os.getComputerID())
-  print('Entrada: '..conf.input)
-  print('Boveda: '..conf.vault)
-  print('Pendientes: '..#pending)
-  print('')
-  print('[1] Depositar monedas Lightman')
-  print('[2] Reintentar credito pendiente')
-  print('[3] Ver valores de monedas')
-  print('[4] Ver inventarios')
-  print('[0] Salir')
-  write('> ');local c=read()
+  local c=dashboard()
   if c=='0' then break
-  elseif c=='1' then deposits()
-  elseif c=='2' then syncPending()
-  elseif c=='3' then for item,v in pairs(conf.coins) do print(item..' = '..v..' WS$') end
-  elseif c=='4' then inventoryList() end
-  print('\nPulsa ENTER para continuar');read()
+  elseif c=='1' then
+    if not auth then login() end
+    if auth then deposits() end
+  elseif c=='2' then auth=nil;loginName=nil;login()
+  elseif c=='3' then syncPending()
+  elseif c=='4' then for item,v in pairs(conf.coins) do print(item..' = '..v..' WS$') end
+  elseif c=='5' then inventoryList()
+  elseif c=='6' then
+    inventoryList()
+    print('Barril DERECHO: '..conf.input)
+    write('Nuevo nombre de entrada (ENTER conservar): ');local name=read()
+    if name~='' then conf.input=name end
+    print('Barril ABAJO: '..conf.vault)
+    write('Nuevo nombre de boveda (ENTER conservar): ');name=read()
+    if name~='' then conf.vault=name end
+    if conf.input==conf.vault then printError('Entrada y boveda no pueden ser iguales')
+    else save(CFG,conf);print('Configuracion guardada') end
+  end
+  if c~='0' then
+    print('');term.setTextColor(colors.lightGray);print('Pulsa ENTER para volver al panel...');read()
+  end
 end
