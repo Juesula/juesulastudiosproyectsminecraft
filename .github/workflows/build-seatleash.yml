@@ -1,0 +1,25 @@
+name: Build SeatLeash NeoForge 1.21.1
+on:
+  push:
+    branches: [chatgpt-seatleash-build-20261025]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: seatleash-build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+      - run: gradle build --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SeatLeash_Bridge_1.21.1
+          path: seatleash-build/build/libs/*.jar
