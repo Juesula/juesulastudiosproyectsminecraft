@@ -1,0 +1,28 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="MIT"
+[[mods]]
+modId="seatleash_bridge"
+version="1.2.0"
+displayName="SeatLeash Bridge"
+displayTest="IGNORE_SERVER_VERSION"
+authors="SeatLeash Community Build"
+description='''Adds seating controls for Create seats and experimental assembled contraptions. LeashAll handles player leashes.'''
+[[dependencies.seatleash_bridge]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.235,)"
+ordering="NONE"
+side="SERVER"
+[[dependencies.seatleash_bridge]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1]"
+ordering="NONE"
+side="SERVER"
+[[dependencies.seatleash_bridge]]
+modId="create"
+type="required"
+versionRange="[6.0.0,)"
+ordering="AFTER"
+side="SERVER"
