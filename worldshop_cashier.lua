@@ -117,4 +117,3 @@ while true do
     print('');term.setTextColor(colors.lightGray);print('Pulsa ENTER para volver al panel...');read()
   end
 end
-
