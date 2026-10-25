@@ -311,7 +311,11 @@ local function publish(depId,rollback)
   end
   if g.release and db.deployments[g.release] then db.deployments[g.release].status='archived' end
   d.status='production';d.published=true;d.publishedAt=now()
-  g.release=d.id;g.version=d.version;g.files=d.files;g.entry=d.entry;g.status='approved';g.updated=now()
+  g.release=d.id;g.version=d.version
+  -- Copiar metadatos para evitar referencias repetidas al serializar la base de datos.
+  local independentFiles={}
+  for i,f in ipairs(d.files) do independentFiles[i]={path=f.path,size=f.size,checksum=f.checksum} end
+  g.files=independentFiles;g.entry=d.entry;g.status='approved';g.updated=now()
   if g.pending==d.id then g.pending=nil end
   audit(rollback and 'ROLLBACK' or 'PROMOTE',d)
   persist()
