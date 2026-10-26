@@ -202,12 +202,17 @@ local username=usernameData.user or ''
 local friends=get('neon_friends.dat',{})
 local opts=get('neon_options.dat',{music=true,sfx=true,stars=true,particles=true,shake=true})
 local localRecords=get('neon_local.dat',{runs=0,last=0,best=0})
-local speaker=peripheral.find('speaker')
+-- Los perifericos son opcionales en la preview de WorldShop.
+-- En CC:Tweaked real el comportamiento del juego se mantiene intacto.
+local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
 local modemNames={}
-for _,name in ipairs(peripheral.getNames()) do
-  if peripheral.hasType(name,'modem') then
-    modemNames[#modemNames+1]=name
-    if not rednet.isOpen(name) then rednet.open(name) end
+if peripheral and rednet and peripheral.getNames and peripheral.hasType
+    and rednet.isOpen and rednet.open then
+  for _,name in ipairs(peripheral.getNames()) do
+    if peripheral.hasType(name,'modem') then
+      modemNames[#modemNames+1]=name
+      if not rednet.isOpen(name) then rednet.open(name) end
+    end
   end
 end
 math.randomseed((os.epoch and os.epoch('utc') or math.floor(os.clock()*1000000)) % 2147483647)
