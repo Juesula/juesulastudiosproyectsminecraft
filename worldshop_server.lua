@@ -1,4 +1,4 @@
--- WorldShop 3.2 | Servidor CC:Tweaked: deployments / rollback + enlace ATM automatico
+-- WorldShop 3.3 | Servidor CC:Tweaked: deployments / rollback + enlace ATM automatico
 -- Almacena cuentas, licencias, juegos, tickets y transacciones.
 local WORLD_TOR_SOURCE=[==[
 -- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
@@ -370,7 +370,7 @@ local activeTests={}
 local launchPreview,closePreview
 local function process(sender,q)
   if type(q)~='table' or q.v~=1 or type(q.op)~='string' then return response(false,{error='Protocolo incorrecto'}) end
-  if q.op=='PING' then return response(true,{name='WorldShop',version='3.2',server=os.getComputerID()}) end
+  if q.op=='PING' then return response(true,{name='WorldShop',version='3.3',server=os.getComputerID(),remoteTest=true,deleteGame=true}) end
   if q.op=='REGISTER' then
     if not validUser(q.user) or type(q.pass)~='string' or #q.pass<4 or #q.pass>64 then return response(false,{error='Usuario 3-16 letras/numeros; clave 4-64.'}) end
     local user=q.user:lower(); if db.accounts[user] then return response(false,{error='Nombre ocupado'}) end
@@ -438,6 +438,14 @@ local function process(sender,q)
   local acc,err=requireUser(sender,q)
   if not acc then return response(false,{error=err}) end
   if q.op=='TEST_START' then return launchPreview(sender,acc,q) end
+  if q.op=='TEST_STATUS' then
+    local s=type(q.sid)=='string' and activeTests[q.sid]
+    if not s or s.sender~=sender or s.owner~=acc.name then
+      return response(false,{error='Prueba no encontrada o expirada'})
+    end
+    return response(true,{status=s.runner.status,finished=s.runner.finished,
+      seconds=math.max(0,math.ceil((s.deadline-now())/1000))})
+  end
   if q.op=='ME' then return response(true,{user=acc.name,balance=acc.balance,dev=acc.dev,studio=acc.studio}) end
   if q.op=='CATALOG' then
     local g={}; for _,item in pairs(db.games) do if item.status=='approved' then g[#g+1]=gamePublic(item) end end
@@ -467,6 +475,67 @@ local function process(sender,q)
   if q.op=='BECOME_DEV' then
     if type(q.studio)~='string' or #q.studio<3 or #q.studio>28 then return response(false,{error='Nombre estudio: 3-28 caracteres'}) end
     acc.studio=q.studio; acc.dev=true; persist(); return response(true,{message='Cuenta de desarrollador activada'})
+  end
+  -- Eliminar un juego (publicado, en revision o rechazado) solo por su propietario.
+  -- Se exige titulo exacto como segunda confirmacion: el cliente NO decide permisos.
+  if q.op=='DELETE_GAME' then
+    local id=tonumber(q.id)
+    if not id or id~=math.floor(id) or id<1 then
+      return response(false,{error='ID de juego incorrecto'})
+    end
+    local game=db.games[id]
+    if not game then return response(false,{error='Ese juego ya no existe'}) end
+    if game.owner~=acc.name then
+      return response(false,{error='Solo el propietario puede eliminar este juego'})
+    end
+    if type(q.confirm)~='string' or q.confirm~=game.title then
+      return response(false,{error='Confirmacion incorrecta: escribe el titulo exacto'})
+    end
+    local deploymentsToDelete={}
+    for depId,dep in pairs(db.deployments) do
+      if dep.gameId==id then deploymentsToDelete[#deploymentsToDelete+1]=depId end
+    end
+    -- Retirar todas las sesiones que estan probando este juego antes de purgar.
+    for _,session in pairs(activeTests) do
+      if session.gameId==id then
+        rednet.send(session.sender,{v=1,op='TEST_FINISHED',sid=session.sid,
+          status='Juego eliminado por su propietario'},P)
+        closePreview(session)
+      end
+    end
+    for uploadId,upload in pairs(uploads) do
+      if upload.gameId==id then uploads[uploadId]=nil end
+    end
+    for _,account in pairs(db.accounts) do
+      if type(account.owned)=='table' then
+        account.owned[id]=nil
+        account.owned[tostring(id)]=nil
+      end
+    end
+    db.games[id]=nil
+    for _,depId in ipairs(deploymentsToDelete) do db.deployments[depId]=nil end
+    db.deletedGames=db.deletedGames or {}
+    db.deletedGames[#db.deletedGames+1]={id=id,title=game.title,owner=acc.name,time=now()}
+    while #db.deletedGames>120 do table.remove(db.deletedGames,1) end
+    -- Primero persistimos: si la escritura falla no se borran artefactos.
+    persist()
+    local cleanupErrors={}
+    local function cleanup(path)
+      if fs.exists(path) then
+        local ok,err=pcall(fs.delete,path)
+        if not ok or fs.exists(path) then
+          cleanupErrors[#cleanupErrors+1]=path..' ('..tostring(err or 'no se pudo borrar')..')'
+        end
+      end
+    end
+    for _,depId in ipairs(deploymentsToDelete) do
+      cleanup(fs.combine(ROOT,'deployments/'..depId))
+    end
+    cleanup(fs.combine(ROOT,'games/'..id)) -- artefactos antiguos WorldShop 2.0
+    if #cleanupErrors>0 then
+      return response(true,{message='Juego eliminado del catalogo. Archivos huerfanos a revisar: '..table.concat(cleanupErrors,'; ')})
+    end
+    return response(true,{message='Juego #'..id..' eliminado. Licencias retiradas; no hay reembolsos automaticos.'})
   end
   if q.op=='MY_GAMES' then
     local g={};for _,game in pairs(db.games) do if game.owner==acc.name then g[#g+1]=gamePublic(game) end end
@@ -779,6 +848,20 @@ local function createPreviewRunner(depId, width, height)
   env.bit32=bit32 and copyLib(bit32) or nil
   env.colors=copyLib(colors);env.colours=env.colors
   env.keys=copyLib(keys);env.term=tty
+  -- Los juegos que buscan un monitor/altavoz opcional no deben fallar porque
+  -- no se les concedan perifericos reales del servidor.
+  env.peripheral={find=function()return nil end,wrap=function()return nil end,
+    getNames=function()return {} end,getType=function()return nil end,
+    hasType=function()return false end,isPresent=function()return false end,
+    getMethods=function()return nil end,call=function()error('Perifericos bloqueados en preview',2)end}
+  env.rednet={send=function()return false end,broadcast=function()return false end,
+    receive=function()return nil end,open=function()return false end,
+    isOpen=function()return false end,close=function()end,lookup=function()return nil end,
+    host=function()return false end,unhost=function()return false end}
+  env.http={get=function()return nil,'HTTP bloqueado en preview' end,
+    post=function()return nil,'HTTP bloqueado en preview' end,
+    request=function()return false,'HTTP bloqueado en preview' end,
+    checkURL=function()return false,'HTTP bloqueado en preview' end}
   env.coroutine=copyLib(coroutine)
   env.textutils={serialize=textutils.serialize,unserialize=textutils.unserialize,
     serialise=textutils.serialize,unserialise=textutils.unserialize,formatTime=textutils.formatTime}
@@ -871,7 +954,7 @@ local function createPreviewRunner(depId, width, height)
   local timers={}
   local pendingEvents={}
   env.os={clock=os.clock,time=os.time,day=os.day,date=os.date,epoch=os.epoch,
-    version=function()return 'WorldShop Preview 3.2' end,
+    version=function()return 'WorldShop Preview 3.3' end,
     getComputerID=function()return -1 end,
     getComputerLabel=function()return 'WorldShop PREVIEW' end,
     startTimer=function(t)
@@ -965,7 +1048,30 @@ local function createPreviewRunner(depId, width, height)
       local n=entryPath(p);if n and hasDir(n) then shellDir=n end end,
     resolve=function(p)return entryPath(p) end,
     getRunningProgram=function()return currentProg end,
-    run=runFile,execute=runFile}
+    run=function(p,...)
+      local ok,err=runFile(p,...)
+      if not ok then env.printError(err) end
+      return ok
+    end,
+    execute=function(p,...)
+      local ok,err=runFile(p,...)
+      if not ok then env.printError(err) end
+      return ok
+    end,
+    -- Compatibilidad con codigo comun que busca scripts desde shell.
+    resolveProgram=function(p)
+      local n=entryPath(p)
+      if n and fileData(n) then return n end
+      if n and fileData(n..'.lua') then return n..'.lua' end
+      return nil
+    end,
+    programs=function()
+      local out={}
+      for n in pairs(sourceFiles) do if n:match('%.lua$') then out[#out+1]=n end end
+      table.sort(out);return out
+    end,
+    getPath=function()return '' end, setPath=function()end,
+    getAlias=function()return nil end, aliases=function()return {} end}
   env.require=(function()
     local loaded={}
     return function(name)
@@ -1036,17 +1142,22 @@ local function createPreviewRunner(depId, width, height)
     if not chunk then error(err,0) end
     return chunk()
   end)
-  -- Algunos entornos ofrecen debug.sethook; si no, no hay preempcion de CPU.
-  if debug and type(debug.sethook)=='function' then
-    pcall(debug.sethook,co,function() error('Limite de instrucciones de la preview',0) end,'',300000)
-  end
+  -- El limite de instrucciones se restablece en CADA paso; el anterior
+  -- era acumulativo y terminaba juegos totalmente validos tras unos frames.
+  local hasHook=debug and type(debug.sethook)=='function'
   runner.filter=nil
   function runner:step(ev)
     if self.finished then return end
     ev=ev or {}
     if ev[1]=='timer' then self.timers[ev[2]]=nil end
     if self.filter and self.filter~=ev[1] then return end
+    if hasHook then
+      pcall(debug.sethook,co,function()
+        error('Limite de instrucciones por evento en la prueba',0)
+      end,'',2000000)
+    end
     local ok,res=coroutine.resume(co,unpack(ev))
+    if hasHook then pcall(debug.sethook,co) end
     if not ok then
       self.finished=true;self.status='ERROR: '..tostring(res):sub(1,95)
     elseif coroutine.status(co)=='dead' then
@@ -1099,8 +1210,8 @@ end
 launchPreview=function(sender,acc,q)
   local dep=db.deployments[tonumber(q.deployment)]
   local game=dep and db.games[dep.gameId]
-  if not dep or not game or game.owner~=acc.name or not acc.dev or dep.status~='pending' then
-    return response(false,{error='Solo el desarrollador puede probar su preview pendiente'})
+  if not dep or not game or game.owner~=acc.name or not acc.dev or dep.status=='failed' then
+    return response(false,{error='Solo el propietario puede probar deployments validos (sin build fallido)'})
   end
   local count=0;local replaceSessions={}
   for _,s in pairs(activeTests) do
@@ -1114,7 +1225,7 @@ launchPreview=function(sender,acc,q)
   local runner,err=createPreviewRunner(dep.id,w,h)
   if not runner then return response(false,{error=err}) end
   local ticket=sid()
-  local session={sid=ticket,sender=sender,owner=acc.name,runner=runner,
+  local session={sid=ticket,sender=sender,owner=acc.name,gameId=game.id,runner=runner,
     deadline=now()+180000,last={},sentFinish=false}
   activeTests[ticket]=session
   runner:step({})

@@ -1,4 +1,4 @@
--- WorldShop 3.2 | Tienda / Deployments
+-- WorldShop 3.3 | Tienda / Deployments
 -- Motor integrado. Se copia automaticamente cuando un juego lo necesita.
 local WORLD_TOR_SOURCE=[==[
 -- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
@@ -535,8 +535,15 @@ local function testOnServer(game,dep)
     waitkey();return
   end
   local start=rpc('TEST_START',{deployment=dep.id,w=w,h=h-3},6)
-  if not start.ok then status(start);waitkey();return end
+  if not start.ok then
+    status(start)
+    print('Comprueba que SERVIDOR y CLIENTE usan WorldShop 3.3.')
+    waitkey();return
+  end
   local ticket=start.sid
+  if type(ticket)~='string' then
+    printError('El servidor devolvio una sesion de prueba invalida.');waitkey();return
+  end
   local result=start.status or 'Iniciando'
   local started=os.epoch('utc')
   local alive=true
@@ -605,8 +612,9 @@ local function testOnServer(game,dep)
   local function heartbeat()
     while alive do
       titleBar()
-      sleep(4)
+      -- Refrescar la pantalla (se pudieron perder los frames del arranque).
       rednet.send(server,{v=1,op='TEST_REFRESH',sid=ticket},P)
+      sleep(2)
     end
   end
   local ok,err=pcall(function() parallel.waitForAny(inputs,screenEvents,heartbeat) end)
@@ -623,17 +631,19 @@ local function runPreview(game,d)
   screen('PREVIEW / D'..d.id,'Solo para el desarrollador')
   print('Version: '..d.version)
   print('Estado: '..d.status)
-  if d.status~='pending' then
-    printError('Solo se pueden probar previews pendientes.');waitkey();return
+  if d.status=='failed' then
+    printError('Este build fallo. Corrige los errores antes de probarlo.');waitkey();return
   end
   print('')
   print('[1] Probar EN EL SERVIDOR (no se descarga)')
-  print('[2] Descargar y ejecutar en mi PC (sin aislamiento)')
+  if d.status=='pending' then
+    print('[2] Descargar y ejecutar en mi PC (sin aislamiento)')
+  end
   print('[0] Volver')
   local option=ask('> ')
   if option=='1' then
     testOnServer(game,d)
-  elseif option=='2' then
+  elseif option=='2' and d.status=='pending' then
     print('ADVERTENCIA: el juego accede a tu ordenador local.')
     if ask('Continuar? (SI/no): '):upper()~='SI' then return end
     local installed=install(game,d)
@@ -682,6 +692,65 @@ local function updateGame()
   local selectNum=tonumber(ask('Numero / 0 cancelar: '))
   if selectNum and arr[selectNum] then upload(arr[selectNum]) end
 end
+-- Acceso directo a pruebas remotas de cualquiera de tus versiones publicadas.
+local function testMyGame()
+  local r=rpc('MY_GAMES')
+  if not r.ok then status(r);waitkey();return end
+  local arr=r.games or {}
+  screen('PROBAR JUEGOS EN SERVIDOR','No se descarga nada al cliente')
+  if #arr==0 then print('Aun no tienes juegos.');waitkey();return end
+  for i,g in ipairs(arr) do
+    print(i..'. #J'..g.id..' '..g.title..' ['..g.status..']')
+  end
+  local n=tonumber(ask('Numero del juego / 0 cancelar: '))
+  if not n or not arr[n] then return end
+  local g=arr[n]
+  local d=rpc('DEPLOYMENTS',{id=g.id})
+  if not d.ok then status(d);waitkey();return end
+  local valid={}
+  for _,item in ipairs(d.deployments or {}) do
+    if item.status~='failed' then valid[#valid+1]=item end
+  end
+  screen('ELEGIR VERSION / '..g.title,'Pruebas en el servidor WorldShop')
+  if #valid==0 then print('No hay deployments ejecutables.');waitkey();return end
+  for i,item in ipairs(valid) do
+    print(i..'. D'..item.id..' v'..item.version..' ['..item.status..']')
+  end
+  local chosen=tonumber(ask('Numero de version / 0 cancelar: '))
+  if chosen and valid[chosen] then testOnServer(g,valid[chosen]) end
+end
+
+-- Eliminacion irreversible y exclusiva del propietario; revalidada en el servidor.
+local function deleteMyGame()
+  local r=rpc('MY_GAMES')
+  if not r.ok then status(r);waitkey();return end
+  local arr=r.games or {}
+  screen('ELIMINAR UNO DE MIS JUEGOS','Solo tu puedes eliminar tus juegos')
+  if #arr==0 then print('No tienes juegos.');waitkey();return end
+  for i,g in ipairs(arr) do
+    print(i..'. #J'..g.id..' '..g.title..' ['..g.status..']')
+  end
+  local n=tonumber(ask('Numero del juego / 0 cancelar: '))
+  if not n or not arr[n] then return end
+  local g=arr[n]
+  screen('ELIMINACION DEFINITIVA','Juego #J'..g.id..' | '..g.title)
+  print('Se retira de tienda y bibliotecas, elimina deployments')
+  print('y revoca licencias. NO se reembolsan compras.')
+  print('Esta operacion NO se puede deshacer desde WorldShop.')
+  print('Haz una copia de seguridad si quieres conservarlo.')
+  print('')
+  local confirmation=ask('Escribe el TITULO EXACTO para confirmar: ')
+  if confirmation~=g.title then
+    print('Titulo incorrecto: cancelado.');waitkey();return
+  end
+  if ask('Escribe ELIMINAR para confirmar: ')~='ELIMINAR' then
+    print('Cancelado.');waitkey();return
+  end
+  local res=rpc('DELETE_GAME',{id=g.id,confirm=confirmation},8)
+  status(res)
+  waitkey()
+end
+
 local function developers()
   refresh()
   if not dev then
@@ -697,6 +766,8 @@ local function developers()
     print('[2] Publicar actualizacion')
     print('[3] Historial de deployments')
     print('[4] Mis juegos y estados')
+    print('[5] Probar juego EN EL SERVIDOR')
+    print('[6] Eliminar uno de mis juegos')
     print('[0] Volver')
     local op=ask('> ')
     if op=='0' or op=='' then return
@@ -711,6 +782,8 @@ local function developers()
         local n=tonumber(ask('Numero / 0 cancelar: '))
         if n and (r.games or {})[n] then deploymentHistory(r.games[n]) end
       end
+    elseif op=='5' then testMyGame()
+    elseif op=='6' then deleteMyGame()
     elseif op=='4' then
       local r=rpc('MY_GAMES');screen('MIS PUBLICACIONES')
       if r.ok then

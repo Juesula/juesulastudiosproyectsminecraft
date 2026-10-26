@@ -1,4 +1,4 @@
--- WorldShop 3.2 | Cajero automatico de monedas fisicas Lightman's Currency
+-- WorldShop 3.3 | Cajero automatico de monedas fisicas Lightman's Currency
 -- Requiere dos inventarios conectados por modems CON CABLE: entrada y caja fuerte.
 local P,HOST='worldshop.v1','worldshop'
 local CFG='worldshop_cashier.cfg'
