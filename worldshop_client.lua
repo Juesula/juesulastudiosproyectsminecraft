@@ -1,4 +1,4 @@
--- WorldShop 3.0 | Tienda / Deployments
+-- WorldShop 3.2 | Tienda / Deployments
 -- Motor integrado. Se copia automaticamente cuando un juego lo necesita.
 local WORLD_TOR_SOURCE=[==[
 -- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
@@ -214,9 +214,9 @@ if not ready then printError('WorldShop: conecta un modem.');return end
 math.randomseed((os.epoch('utc')+os.getComputerID())%2147483647)
 local function col(c) if term.isColor() then term.setTextColor(c) end end
 local function bg(c) if term.isColor() then term.setBackgroundColor(c) end end
-local function line(y,str,c)
+local function line(y,str,c,b)
   local w,h=term.getSize();if y<1 or y>h then return end
-  term.setCursorPos(1,y);bg(colors.black);col(c or colors.white)
+  term.setCursorPos(1,y);bg(b or colors.black);col(c or colors.white)
   str=tostring(str or '')
   term.write(str:sub(1,w)..string.rep(' ',math.max(0,w-#str)))
 end
@@ -226,7 +226,7 @@ local function screen(title,sub)
   line(2,'  '..tostring(title or 'TIENDA')..'  |  Conexion Rednet',colors.cyan,colors.gray)
   line(3,string.rep('-',w),colors.lightBlue)
   if sub then line(4,' '..sub,colors.yellow) else line(4,'',colors.white) end
-  line(h,'  WorldShop v3.0  -  World Studios',colors.lightGray)
+  line(h,'  WorldShop v3.2  -  World Studios',colors.lightGray)
   term.setCursorPos(1,5);col(colors.white);bg(colors.black)
 end
 local function waitkey()
@@ -526,22 +526,120 @@ local function upload(existing)
   end
   waitkey()
 end
+-- Vista remota: el juego se ejecuta en el servidor; solo se envian teclas y filas.
+local function testOnServer(game,dep)
+  local host=term.current()
+  local w,h=host.getSize()
+  if w<30 or h<11 then
+    printError('Necesitas un terminal de al menos 30x11 para probar en servidor.')
+    waitkey();return
+  end
+  local start=rpc('TEST_START',{deployment=dep.id,w=w,h=h-3},6)
+  if not start.ok then status(start);waitkey();return end
+  local ticket=start.sid
+  local result=start.status or 'Iniciando'
+  local started=os.epoch('utc')
+  local alive=true
+  local function titleBar()
+    host.setBackgroundColor(colors.blue);host.setTextColor(colors.white)
+    for y=1,3 do host.setCursorPos(1,y);host.write((' '):rep(w)) end
+    host.setCursorPos(2,1)
+    host.write(('D'..dep.id..'  '..game.title..'  v'..dep.version):sub(1,w-2))
+    host.setCursorPos(2,2);host.setBackgroundColor(colors.red)
+    host.write(' [X] SALIR ')
+    host.setBackgroundColor(colors.blue)
+    host.write('  PRUEBA REMOTA / SERVIDOR')
+    host.setCursorPos(2,3)
+    local left=math.max(0,180-math.floor((os.epoch('utc')-started)/1000))
+    host.write(('F7 salir | '..left..'s | '..result):sub(1,w-2))
+    host.setBackgroundColor(colors.black);host.setTextColor(colors.white)
+  end
+  local function renderRow(row)
+    if type(row)~='table' or type(row[1])~='number' or row[1]<1 or row[1]>h-3 then return end
+    local text,fg,bg=row[2],row[3],row[4]
+    if type(text)~='string' or type(fg)~='string' or type(bg)~='string' then return end
+    if #text~=w or #fg~=w or #bg~=w or fg:find('[^0-9a-f]') or bg:find('[^0-9a-f]') then return end
+    host.setCursorPos(1,row[1]+3)
+    host.blit(text,fg,bg)
+  end
+  host.setBackgroundColor(colors.black);host.clear()
+  titleBar()
+  local function inputs()
+    local allowed={char=true,key=true,key_up=true,paste=true,
+      mouse_click=true,mouse_drag=true,mouse_up=true,mouse_scroll=true}
+    while alive do
+      local ev={os.pullEventRaw()}
+      if ev[1]=='terminate' or ev[1]=='term_resize' then
+        result='Desconectado';return
+      end
+      if ev[1]=='key' and ev[2]==keys.f7 then result='Prueba cerrada';return end
+      if ev[1]=='mouse_click' and ev[4]==2 and ev[3]>=2 and ev[3]<=12 then
+        result='Prueba cerrada';return
+      end
+      if allowed[ev[1]] then
+        if ev[1]:sub(1,5)=='mouse' then
+          if type(ev[4])=='number' and ev[4]>=4 and ev[4]<=h then
+            ev[4]=ev[4]-3
+          else ev=nil end
+        elseif ev[1]=='paste' and type(ev[2])=='string' then ev[2]=ev[2]:sub(1,256) end
+        if ev then rednet.send(server,{v=1,op='TEST_INPUT',sid=ticket,event=ev},P) end
+      end
+    end
+  end
+  local function screenEvents()
+    while alive do
+      local sid,msg=rednet.receive(P,1)
+      if sid==server and type(msg)=='table' and msg.v==1 and msg.sid==ticket then
+        if msg.op=='TEST_FRAME' and type(msg.rows)=='table' then
+          for _,row in ipairs(msg.rows) do renderRow(row) end
+          if type(msg.status)=='string' then result=msg.status end
+        elseif msg.op=='TEST_FINISHED' then
+          result=tostring(msg.status or 'Juego terminado')
+          titleBar()
+          sleep(2)
+          return
+        end
+      end
+    end
+  end
+  local function heartbeat()
+    while alive do
+      titleBar()
+      sleep(4)
+      rednet.send(server,{v=1,op='TEST_REFRESH',sid=ticket},P)
+    end
+  end
+  local ok,err=pcall(function() parallel.waitForAny(inputs,screenEvents,heartbeat) end)
+  alive=false
+  rednet.send(server,{v=1,op='TEST_STOP',sid=ticket},P)
+  host.setBackgroundColor(colors.black);host.setTextColor(colors.white)
+  host.clear();host.setCursorPos(1,1)
+  if not ok then printError('Fallo en la vista remota: '..tostring(err))
+  else print('Preview D'..dep.id..' | '..result) end
+  waitkey()
+end
+
 local function runPreview(game,d)
   screen('PREVIEW / D'..d.id,'Solo para el desarrollador')
   print('Version: '..d.version)
   print('Estado: '..d.status)
   if d.status~='pending' then
-    print('La preview ya no esta pendiente.');waitkey();return
+    printError('Solo se pueden probar previews pendientes.');waitkey();return
   end
-  print('ATENCION: Ejecutaras tu programa Lua')
-  print('con permisos de este ordenador.')
-  if ask('Descargar y probar? (s/n): '):lower()~='s' then return end
-  local installed=install(game,d)
-  if installed then
-    print('')
-    if ask('Ejecutar la preview? (s/n): '):lower()=='s' then play(game,d) end
-  else printError('Preview no instalada; no se ejecutara') end
-  waitkey()
+  print('')
+  print('[1] Probar EN EL SERVIDOR (no se descarga)')
+  print('[2] Descargar y ejecutar en mi PC (sin aislamiento)')
+  print('[0] Volver')
+  local option=ask('> ')
+  if option=='1' then
+    testOnServer(game,d)
+  elseif option=='2' then
+    print('ADVERTENCIA: el juego accede a tu ordenador local.')
+    if ask('Continuar? (SI/no): '):upper()~='SI' then return end
+    local installed=install(game,d)
+    if installed and ask('Ejecutar la preview? (s/n): '):lower()=='s' then play(game,d) end
+    waitkey()
+  end
 end
 local function deploymentHistory(game)
   local r=rpc('DEPLOYMENTS',{id=game.id})
