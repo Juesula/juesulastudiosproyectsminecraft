@@ -1,4 +1,4 @@
--- WorldShop 3.1 | Servidor CC:Tweaked: deployments / rollback + enlace ATM automatico
+-- WorldShop 3.2 | Servidor CC:Tweaked: deployments / rollback + enlace ATM automatico
 -- Almacena cuentas, licencias, juegos, tickets y transacciones.
 local WORLD_TOR_SOURCE=[==[
 -- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
@@ -366,9 +366,11 @@ for _,g in pairs(db.games) do
 end
 if migrated then persist() end
 local function gamePath(id,file) return fs.combine(fs.combine(ROOT,'games/'..id),file) end
+local activeTests={}
+local launchPreview,closePreview
 local function process(sender,q)
   if type(q)~='table' or q.v~=1 or type(q.op)~='string' then return response(false,{error='Protocolo incorrecto'}) end
-  if q.op=='PING' then return response(true,{name='WorldShop',version='3.0',server=os.getComputerID()}) end
+  if q.op=='PING' then return response(true,{name='WorldShop',version='3.2',server=os.getComputerID()}) end
   if q.op=='REGISTER' then
     if not validUser(q.user) or type(q.pass)~='string' or #q.pass<4 or #q.pass>64 then return response(false,{error='Usuario 3-16 letras/numeros; clave 4-64.'}) end
     local user=q.user:lower(); if db.accounts[user] then return response(false,{error='Nombre ocupado'}) end
@@ -435,6 +437,7 @@ local function process(sender,q)
   end
   local acc,err=requireUser(sender,q)
   if not acc then return response(false,{error=err}) end
+  if q.op=='TEST_START' then return launchPreview(sender,acc,q) end
   if q.op=='ME' then return response(true,{user=acc.name,balance=acc.balance,dev=acc.dev,studio=acc.studio}) end
   if q.op=='CATALOG' then
     local g={}; for _,item in pairs(db.games) do if item.status=='approved' then g[#g+1]=gamePublic(item) end end
@@ -607,226 +610,657 @@ local function process(sender,q)
   end
   return response(false,{error='Operacion no reconocida'})
 end
-local function send(sender,id,res) res.v=1;res.req=id;rednet.send(sender,res,P) end
-local function network()
-  rednet.host(P,HOST)
-  print('WORLD SHOP SERVER ONLINE - ID '..os.getComputerID())
-  print('Protocolo: '..P)
-  print('Cajero: ID '..cashierCfg.cashierId..' | Enlace automatico (primera instalacion)')
-  while true do
-    local sender,q=rednet.receive(P)
-    if type(q)=='table' and type(q.req)=='string' and #q.req<=100 then
-      local key=sender..':'..q.req
-      local res=cache[key]
-      if not res then
-        local ok,ret=pcall(process,sender,q)
-        res=ok and ret or response(false,{error='Fallo del servidor: '..tostring(ret)})
-        cache[key]=res
-        local cnt=0;for _ in pairs(cache) do cnt=cnt+1 end;if cnt>300 then cache={} end
+-- WorldShop 3.2 | Motor de previsualizacion aislado (sin acceso a perifericos).
+-- La CPU sigue siendo compartida: probar codigo desconocido en un servidor
+-- de produccion NO garantiza aislamiento frente a bucles infinitos.
+local function createPreviewRunner(depId, width, height)
+  local dep=db.deployments[depId]
+  if not dep then return nil,'Deployment inexistente' end
+  if type(dep.entry)~='string' or not validPath(dep.entry) then return nil,'Entrada invalida' end
+  width=math.floor(tonumber(width) or 0);height=math.floor(tonumber(height) or 0)
+  if width<20 or height<6 or width>96 or height>40 then return nil,'Resolucion permitida: 20x6 a 96x40' end
+  local sourceFiles={}
+  for _,f in ipairs(dep.files or {}) do
+    if not validPath(f.path) then return nil,'Archivo con ruta invalida' end
+    sourceFiles[f.path]=true
+  end
+  if not sourceFiles[dep.entry] then return nil,'No existe el programa principal' end
+  local virtual, dirs={}, {['']=true}
+  local usedBytes,virtualMax=0,65536
+  local function resolve(path)
+    if type(path)~='string' or #path>120 or path:sub(1,1)=='/' or path:find('\\',1,true) then return nil end
+    local parts={}
+    for part in path:gmatch('[^/]+') do
+      if part=='..' then
+        if #parts==0 then return nil end
+        table.remove(parts)
+      elseif part~='.' and part~='' then
+        if not part:match('^[%w_%.%-]+$') then return nil end
+        parts[#parts+1]=part
       end
-      send(sender,q.req,res)
+    end
+    return table.concat(parts,'/')
+  end
+  local function fileData(path)
+    path=resolve(path)
+    if not path or path=='' then return nil end
+    if virtual[path]~=nil then return virtual[path] end
+    if path=='worldtor_engine.lua' and not sourceFiles[path] then return WORLD_TOR_SOURCE end
+    if not sourceFiles[path] then return nil end
+    local h=fs.open(deployPath(depId,path),'r')
+    if not h then return nil end
+    local content=h.readAll();h.close()
+    return content
+  end
+  local function hasDir(path)
+    if path=='' or dirs[path] then return true end
+    local prefix=path..'/'
+    for p in pairs(sourceFiles) do if p:sub(1,#prefix)==prefix then return true end end
+    for p in pairs(virtual) do if p:sub(1,#prefix)==prefix then return true end end
+    return false
+  end
+  local function setFile(path,data)
+    local before=virtual[path] or ''
+    local total=usedBytes-#before+#data
+    if total>virtualMax or #data>virtualMax then return false,'Disco virtual lleno (64 KB)' end
+    local count=0;for _ in pairs(virtual) do count=count+1 end
+    if virtual[path]==nil and count>=64 then return false,'Demasiados archivos virtuales' end
+    virtual[path]=data;usedBytes=total
+    local prefix=''
+    for part in path:gmatch('([^/]+)/') do prefix=prefix=='' and part or prefix..'/'..part;dirs[prefix]=true end
+    return true
+  end
+  local hex='0123456789abcdef'
+  local function toBlit(c)
+    if type(c)=='string' and #c==1 and hex:find(c,1,true) then return c end
+    if type(c)=='number' and colors.toBlit then
+      local ok,v=pcall(colors.toBlit,c)
+      if ok and type(v)=='string' then return v end
+    end
+    return '0'
+  end
+  local blank=string.rep(' ',width)
+  local fg0=string.rep('0',width)
+  local bg0=string.rep('f',width)
+  local rows={}
+  for y=1,height do rows[y]={blank,fg0,bg0} end
+  local tx,ty=1,1
+  local foreground,background=colors.white,colors.black
+  local blink=false
+  local palette={}
+  local tty={}
+  local function writeCells(text,fore,back)
+    text=tostring(text or '')
+    if ty<1 or ty>height or tx>width then tx=tx+#text;return end
+    local left=math.max(1,tx);local right=math.min(width,tx+#text-1)
+    if right>=left then
+      local a=left-tx+1;local b=right-tx+1
+      local row=rows[ty]
+      row[1]=row[1]:sub(1,left-1)..text:sub(a,b)..row[1]:sub(right+1)
+      row[2]=row[2]:sub(1,left-1)..fore:sub(a,b)..row[2]:sub(right+1)
+      row[3]=row[3]:sub(1,left-1)..back:sub(a,b)..row[3]:sub(right+1)
+    end
+    tx=tx+#text
+  end
+  tty.write=function(s)
+    s=tostring(s or '');writeCells(s,string.rep(toBlit(foreground),#s),string.rep(toBlit(background),#s))
+  end
+  tty.blit=function(s,fc,bc)
+    if type(s)~='string' or type(fc)~='string' or type(bc)~='string' or #s~=#fc or #s~=#bc then
+      error('term.blit: longitudes incorrectas',2)
+    end
+    if fc:find('[^0-9a-f]') or bc:find('[^0-9a-f]') then error('term.blit: colores invalidos',2) end
+    writeCells(s,fc,bc)
+  end
+  tty.clear=function()
+    local f,b=string.rep(toBlit(foreground),width),string.rep(toBlit(background),width)
+    for y=1,height do rows[y]={blank,f,b} end
+  end
+  tty.clearLine=function()
+    if ty>=1 and ty<=height then rows[ty]={blank,string.rep(toBlit(foreground),width),string.rep(toBlit(background),width)} end
+  end
+  tty.scroll=function(n)
+    n=math.floor(tonumber(n) or 0)
+    if n==0 then return end
+    if math.abs(n)>=height then tty.clear();return end
+    if n>0 then
+      for y=1,height-n do rows[y]=rows[y+n] end
+      for y=height-n+1,height do rows[y]={blank,string.rep(toBlit(foreground),width),string.rep(toBlit(background),width)} end
+    else
+      n=-n
+      for y=height,n+1,-1 do rows[y]=rows[y-n] end
+      for y=1,n do rows[y]={blank,string.rep(toBlit(foreground),width),string.rep(toBlit(background),width)} end
     end
   end
-end
--- Entorno de pruebas: muestra una barra de moderacion y ejecuta solo
--- Lua con una API limitada. NO garantiza aislamiento ante codigo hostil.
-local function reviewGame(depId)
-  local dep=db.deployments[depId]
-  if not dep then return end
-  local g=db.games[dep.gameId]
-  if not g then return end
-  local parent=term.current()
-  local width,height=parent.getSize()
-  if width<28 or height<10 then printError('Necesitas una pantalla mayor para el modo prueba');sleep(2);return end
-  local gameArea=window.create(parent,1,4,width,height-3,true)
-  local statusText='INICIANDO'
-  local function paintBar()
-    parent.setBackgroundColor(colors.blue);parent.setTextColor(colors.white)
-    for y=1,3 do parent.setCursorPos(1,y);parent.write((' '):rep(width)) end
-    parent.setCursorPos(2,1);parent.write(('PREVIEW D'..depId..'  '..g.title..' '..dep.version):sub(1,width-2))
-    parent.setCursorPos(2,2);parent.setBackgroundColor(colors.green);parent.write(' APROBAR ')
-    parent.setBackgroundColor(colors.red);parent.write(' RECHAZAR ')
-    parent.setBackgroundColor(colors.gray);parent.write(' SALIR ')
-    parent.setCursorPos(2,3);parent.setBackgroundColor(colors.blue)
-    parent.write(('F5 aprobar | F6 rechazar | F7 salir | '..statusText):sub(1,width-2))
-    parent.setBackgroundColor(colors.black);parent.setTextColor(colors.white)
+  tty.getSize=function() return width,height end
+  tty.getCursorPos=function() return tx,ty end
+  tty.setCursorPos=function(x,y) tx=math.floor(tonumber(x) or 1);ty=math.floor(tonumber(y) or 1) end
+  tty.getCursorBlink=function() return blink end
+  tty.setCursorBlink=function(v) blink=not not v end
+  tty.isColor=function() return true end;tty.isColour=tty.isColor
+  tty.getTextColor=function()return foreground end;tty.getTextColour=tty.getTextColor
+  tty.getBackgroundColor=function()return background end;tty.getBackgroundColour=tty.getBackgroundColor
+  tty.setTextColor=function(c) foreground=c end;tty.setTextColour=tty.setTextColor
+  tty.setBackgroundColor=function(c) background=c end;tty.setBackgroundColour=tty.setBackgroundColor
+  tty.setPaletteColor=function(c,r,g,b) palette[c]={r,g,b} end;tty.setPaletteColour=tty.setPaletteColor
+  tty.getPaletteColor=function(c)
+    if palette[c] then return unpack(palette[c]) end
+    if colors.getPaletteColor then return colors.getPaletteColor(c) end
+    return 0,0,0
   end
-  paintBar()
-  local saved={}
-  for _,file in ipairs(dep.files) do saved[file.path]=true end
-  local virtual={}
-  local function clean(path)
-    if type(path)~='string' then return nil end
-    path=path:gsub('^/*',''):gsub('^%./','')
-    if not validPath(path) then return nil end
-    return path
-  end
-  local function readData(path)
-    local p=clean(path)
-    if not p then return nil end
-    if virtual[p]~=nil then return virtual[p] end
-    if not saved[p] and p=='worldtor_engine.lua' then return WORLD_TOR_SOURCE end
-    if not saved[p] then return nil end
-    local h=fs.open(deployPath(depId,p),'r');if not h then return nil end
-    local data=h.readAll();h.close();return data
-  end
-  local cursorTerm={}
-  local legalTerm={'write','blit','clear','clearLine','getCursorPos','setCursorPos','getCursorBlink','setCursorBlink','getSize','scroll','isColor','isColour','setTextColor','setTextColour','getTextColor','getTextColour','setBackgroundColor','setBackgroundColour','getBackgroundColor','getBackgroundColour','setPaletteColor','getPaletteColor'}
-  for _,fn in ipairs(legalTerm) do
-    if type(gameArea[fn])=='function' then cursorTerm[fn]=function(...) return gameArea[fn](...) end end
-  end
-  cursorTerm.current=function() return cursorTerm end
-  cursorTerm.native=function() return cursorTerm end
-  cursorTerm.redirect=function(other)
-    if other~=cursorTerm then error('No se permite redirigir fuera del area del juego',2) end
-    return cursorTerm
+  tty.getPaletteColour=tty.getPaletteColor
+  tty.current=function()return tty end;tty.native=tty.current
+  tty.redirect=function(other)
+    if other~=tty then error('No se puede redirigir a una terminal externa',2) end
+    return tty
   end
   local env={}
-  local primitives={'assert','error','ipairs','pairs','next','pcall','xpcall','select','tonumber','tostring','type','unpack','rawequal','rawget','rawset','setmetatable','getmetatable'}
-  for _,n in ipairs(primitives) do env[n]=_G[n] end
-  env._VERSION=_VERSION;env._G=env
-  local function shallowcopy(t)
-    local r={};for k,v in pairs(t) do r[k]=v end;return r
+  for _,key in ipairs({'assert','error','ipairs','pairs','next','pcall','xpcall','select',
+    'tonumber','tostring','type','unpack','rawequal','rawget','rawset','setmetatable','getmetatable'}) do env[key]=_G[key] end
+  local function copyLib(lib)
+    local clone={};for k,v in pairs(lib) do clone[k]=v end;return clone
   end
-  env.math=shallowcopy(math);env.string=shallowcopy(string);env.table=shallowcopy(table)
-  env.bit32=bit32 and shallowcopy(bit32) or nil
-  env.colors=shallowcopy(colors);env.colours=env.colors
-  env.keys=shallowcopy(keys)
-  env.term=cursorTerm
-  env.textutils={serialize=textutils.serialize,unserialize=textutils.unserialize,serialise=textutils.serialize,unserialise=textutils.unserialize,formatTime=textutils.formatTime}
-  local virtualBytes=0
+  env._G=env;env._VERSION=_VERSION
+  env.math=copyLib(math);env.string=copyLib(string);env.table=copyLib(table)
+  -- El random de un juego no debe alterar los tokens ni el cajero del servidor.
+  local randomState=(now()+depId*7919)%2147483647
+  env.math.randomseed=function(value)
+    randomState=(math.floor(tonumber(value) or 1)%2147483646)+1
+  end
+  env.math.random=function(a,b)
+    randomState=(randomState*48271)%2147483647
+    local fraction=randomState/2147483647
+    if a==nil then return fraction end
+    if b==nil then a,b=1,a end
+    a=math.floor(tonumber(a) or 1);b=math.floor(tonumber(b) or 1)
+    if a>b then error('Intervalo de random invalido',2) end
+    return a+math.floor(fraction*(b-a+1))
+  end
+  env.bit32=bit32 and copyLib(bit32) or nil
+  env.colors=copyLib(colors);env.colours=env.colors
+  env.keys=copyLib(keys);env.term=tty
+  env.coroutine=copyLib(coroutine)
+  env.textutils={serialize=textutils.serialize,unserialize=textutils.unserialize,
+    serialise=textutils.serialize,unserialise=textutils.unserialize,formatTime=textutils.formatTime}
   env.fs={}
-  env.fs.combine=function(a,b) return (a=='' and '' or a..'/')..b end
-  env.fs.getName=function(p) return tostring(p):match('[^/]+$') or '' end
-  env.fs.getDir=function(p) return tostring(p):match('^(.*)/[^/]*$') or '' end
-  env.fs.exists=function(p) return readData(p)~=nil end
-  env.fs.isDir=function(p) return false end
-  env.fs.getSize=function(p) local s=readData(p);return s and #s or 0 end
-  env.fs.list=function(dir)
-    local prefix=(dir=='' or dir=='.') and '' or (clean(dir) or '')..'/'
-    local arr,seen={},{}
-    for p in pairs(saved) do
-      if p:sub(1,#prefix)==prefix then
-        local s=p:sub(#prefix+1):match('^[^/]+')
-        if s and not seen[s] then seen[s]=true;arr[#arr+1]=s end
+  local vfs=env.fs
+  vfs.combine=function(a,b) return resolve(tostring(a or '')..'/'..tostring(b or '')) or '' end
+  vfs.getName=function(p) return tostring(p or ''):match('[^/]+$') or '' end
+  vfs.getDir=function(p) return tostring(p or ''):match('^(.*)/[^/]*$') or '' end
+  vfs.exists=function(p) local n=resolve(p);return n~=nil and (fileData(n)~=nil or hasDir(n)) end
+  vfs.isDir=function(p) local n=resolve(p);return n~=nil and hasDir(n) end
+  vfs.getSize=function(p) local s=fileData(p);return s and #s or 0 end
+  vfs.isReadOnly=function(p) local n=resolve(p);return n==nil or (sourceFiles[n] and virtual[n]==nil) end
+  vfs.getFreeSpace=function() return virtualMax-usedBytes end
+  vfs.getCapacity=function() return virtualMax end
+  vfs.list=function(p)
+    local n=resolve(p);if n==nil or (n~='' and not hasDir(n)) then error('No es un directorio',2) end
+    local prefix=n=='' and '' or n..'/'
+    local seen,arr={},{}
+    for _,tbl in ipairs({sourceFiles,virtual,dirs}) do
+      for path in pairs(tbl) do
+        if path:sub(1,#prefix)==prefix then
+          local rest=path:sub(#prefix+1);local part=rest:match('^[^/]+')
+          if part and not seen[part] then seen[part]=true;arr[#arr+1]=part end
+        end
       end
     end
+    if prefix=='' and not seen['worldtor_engine.lua'] then arr[#arr+1]='worldtor_engine.lua' end
     table.sort(arr);return arr
   end
-  env.fs.open=function(path,mode)
-    local p=clean(path);if not p then return nil,'Ruta de archivo denegada' end
-    if mode=='r' or mode=='rb' then
-      local content=readData(p);if not content then return nil,'Archivo no encontrado' end
-      local pos=1
-      return {readAll=function() local v=content:sub(pos);pos=#content+1;return v end,
-        readLine=function() if pos>#content then return nil end local e=content:find('\n',pos,true);local v=content:sub(pos,e and e-1 or nil);pos=e and e+1 or #content+1;return v end,
-        read=function(n) if pos>#content then return nil end local v=content:sub(pos,pos+(n or 1)-1);pos=pos+#v;return v end,
-        close=function() end}
-    elseif mode=='w' or mode=='a' then
-      local data=mode=='a' and (virtual[p] or '') or ''
-      return {write=function(x) data=data..tostring(x) end,
-        writeLine=function(x) data=data..tostring(x)..'\n' end,
-        flush=function() end,
-        close=function()
-          local existing=virtual[p] or ''
-          if virtualBytes-#existing+#data>65536 then error('Memoria virtual llena (64KB)') end
-          virtualBytes=virtualBytes-#existing+#data; virtual[p]=data
-        end}
-    end
-    return nil,'Modo de archivo no permitido'
+  vfs.makeDir=function(p)
+    local n=resolve(p);if not n or n=='' or sourceFiles[n] then return false end
+    dirs[n]=true;return true
   end
-  env.os={clock=os.clock,time=os.time,day=os.day,epoch=os.epoch,date=os.date,startTimer=os.startTimer,cancelTimer=os.cancelTimer,getComputerID=function()return -1 end,version=function()return 'WorldShop Review' end}
+  vfs.delete=function(p)
+    local n=resolve(p);if not n then return false end
+    if virtual[n]~=nil then usedBytes=usedBytes-#virtual[n];virtual[n]=nil;return true end
+    if dirs[n] and not sourceFiles[n] then dirs[n]=nil;return true end
+    return false
+  end
+  vfs.copy=function(from,to)
+    local n=resolve(to);local data=fileData(from)
+    if not n or n=='' or not data or sourceFiles[n] then return false end
+    return setFile(n,data)
+  end
+  vfs.move=function(from,to)
+    local n=resolve(from);if not n or virtual[n]==nil then return false end
+    if vfs.copy(from,to) then vfs.delete(n);return true end
+    return false
+  end
+  vfs.open=function(path,mode)
+    local n=resolve(path);mode=mode or 'r'
+    if not n or n=='' then return nil,'Ruta no permitida' end
+    if mode=='r' or mode=='rb' then
+      local data=fileData(n);if not data then return nil,'Archivo inexistente' end
+      local pos=1
+      return {readAll=function() local s=data:sub(pos);pos=#data+1;return s end,
+        readLine=function(withTrailing)
+          if pos>#data then return nil end
+          local e=data:find('\n',pos,true)
+          local line=data:sub(pos,e and (withTrailing and e or e-1) or nil)
+          pos=e and e+1 or #data+1;return line
+        end,
+        read=function(nchars)
+          if pos>#data then return nil end
+          nchars=math.max(1,math.floor(tonumber(nchars) or 1))
+          local str=data:sub(pos,pos+nchars-1);pos=pos+#str;return str
+        end,
+        close=function() end}
+    end
+    if mode~='w' and mode~='a' and mode~='wb' and mode~='ab' then return nil,'Modo no permitido' end
+    if sourceFiles[n] then return nil,'Solo lectura: deployment' end
+    local data=(mode=='a' or mode=='ab') and (virtual[n] or '') or ''
+    local closed=false
+    local function flush()
+      if closed then return end
+      local ok,err=setFile(n,data);if not ok then error(err,2) end
+    end
+    return {write=function(s)
+        if closed then error('Archivo cerrado',2) end
+        local part=tostring(s or '')
+        if #data+#part>virtualMax then error('Archivo virtual demasiado grande',2) end
+        data=data..part
+      end,
+      writeLine=function(s) if closed then error('Archivo cerrado',2) end
+        local part=tostring(s or '')..'\n';if #data+#part>virtualMax then error('Archivo virtual demasiado grande',2) end
+        data=data..part end,
+      flush=flush,
+      close=function() flush();closed=true end}
+  end
+  local timers={}
+  local pendingEvents={}
+  env.os={clock=os.clock,time=os.time,day=os.day,date=os.date,epoch=os.epoch,
+    version=function()return 'WorldShop Preview 3.2' end,
+    getComputerID=function()return -1 end,
+    getComputerLabel=function()return 'WorldShop PREVIEW' end,
+    startTimer=function(t)
+      local count=0;for _ in pairs(timers) do count=count+1 end
+      if count>=64 then error('Demasiados temporizadores en la prueba',2) end
+      local id=os.startTimer(math.max(0,math.min(60,tonumber(t) or 0)))
+      timers[id]=true;return id
+    end,
+    cancelTimer=function(id) timers[id]=nil;os.cancelTimer(id) end,
+    queueEvent=function(name,...)
+      if type(name)~='string' or #name<1 or #name>64 or #pendingEvents>=64 then
+        error('Evento virtual invalido o cola llena',2)
+      end
+      pendingEvents[#pendingEvents+1]={name,...}
+    end,
+    shutdown=function()error('Apagado virtual no disponible',2)end,
+    reboot=function()error('Reinicio virtual no disponible',2)end}
   local function pull(filter)
     while true do
-      local event={coroutine.yield(filter)}
-      if not filter or event[1]==filter then return unpack(event) end
+      local ev
+      if #pendingEvents>0 then ev=table.remove(pendingEvents,1)
+      else ev={coroutine.yield(filter)} end
+      if filter==nil or filter==ev[1] then return unpack(ev) end
     end
   end
   env.os.pullEventRaw=pull
   env.os.pullEvent=function(filter)
-    local e={pull(filter)}
-    if e[1]=='terminate' then error('Terminated',0) end
-    return unpack(e)
+    local ev={pull(filter)}
+    if ev[1]=='terminate' then error('Terminated',0) end
+    return unpack(ev)
   end
   env.sleep=function(t)
-    local timer=os.startTimer(tonumber(t) or 0)
-    while true do local _,v=env.os.pullEvent('timer');if v==timer then return end end
+    local id=env.os.startTimer(t)
+    while true do local _,n=env.os.pullEvent('timer');if n==id then return end end
   end
-  env.write=function(x) cursorTerm.write(tostring(x)) end
-  local function putLine(s)
-    local w,h=cursorTerm.getSize();local x,y=cursorTerm.getCursorPos()
-    if y>h then cursorTerm.scroll(1);y=h end
-    local str=tostring(s)
-    if x+#str>w then cursorTerm.scroll(1);x=1;y=h end
-    cursorTerm.setCursorPos(x,y);cursorTerm.write(str:sub(1,w-x+1))
-    if y>=h then cursorTerm.scroll(1);cursorTerm.setCursorPos(1,h)
-    else cursorTerm.setCursorPos(1,y+1) end
+  env.write=function(str)tty.write(str) end
+  env.print=function(...)
+    local data={};for i=1,select('#',...) do data[i]=tostring(select(i,...)) end
+    local s=table.concat(data,'\t')
+    local x,y=tty.getCursorPos();local w,h=tty.getSize()
+    if y>h then tty.scroll(y-h);tty.setCursorPos(x,h);y=h end
+    tty.write(s);x,y=tty.getCursorPos()
+    if y>=h then tty.scroll(1);tty.setCursorPos(1,h)
+    else tty.setCursorPos(1,y+1) end
   end
-  env.print=function(...) local t={};for i=1,select('#',...) do t[i]=tostring(select(i,...)) end;putLine(table.concat(t,'\t')) end
-  env.printError=function(...)cursorTerm.setTextColor(colors.red);env.print(...);cursorTerm.setTextColor(colors.white) end
-  env.read=function(mask)
-    local s='';local x,y=cursorTerm.getCursorPos()
+  env.printError=function(...)
+    local prev=tty.getTextColor();tty.setTextColor(colors.red);env.print(...);tty.setTextColor(prev)
+  end
+  env.read=function(replace)
+    local chars='';local mask=type(replace)=='string' and replace:sub(1,1) or nil
     while true do
       local ev,a=env.os.pullEvent()
-      if ev=='char' then
-        if #s<math.max(1,select(1,cursorTerm.getSize())-x) then
-          s=s..a;cursorTerm.write(mask and mask:sub(1,1) or a)
-        end
-      elseif ev=='paste' then
-        local str=tostring(a):sub(1,48-#s);s=s..str
-        cursorTerm.write(mask and string.rep(mask:sub(1,1),#str) or str)
-      elseif ev=='key' and a==keys.backspace then
-        if #s>0 then s=s:sub(1,-2); local cx,cy=cursorTerm.getCursorPos();cursorTerm.setCursorPos(math.max(1,cx-1),cy);cursorTerm.write(' ');cursorTerm.setCursorPos(math.max(1,cx-1),cy) end
-      elseif ev=='key' and a==keys.enter then env.print('');return s end
+      if ev=='char' and type(a)=='string' and #chars<256 then
+        chars=chars..a;tty.write(mask or a)
+      elseif ev=='paste' and type(a)=='string' then
+        local s=a:sub(1,math.max(0,256-#chars));chars=chars..s
+        tty.write(mask and mask:rep(#s) or s)
+      elseif ev=='key' and a==keys.backspace and #chars>0 then
+        chars=chars:sub(1,-2);local x,y=tty.getCursorPos();tty.setCursorPos(math.max(1,x-1),y)
+        tty.write(' ');tty.setCursorPos(math.max(1,x-1),y)
+      elseif ev=='key' and a==keys.enter then env.print();return chars end
     end
   end
-  local function loadGame(path)
-    local src=readData(path)
-    if not src then return nil,'Archivo no incluido en el juego: '..tostring(path) end
-    return load(src,'@review/'..path,'t',env)
+  local shellDir='';local currentProg=dep.entry
+  local function entryPath(path)
+    if type(path)~='string' then return nil end
+    if path:sub(1,1)=='/' then return nil end
+    local n=resolve((shellDir=='' and '' or shellDir..'/')..path)
+    return n
   end
-  env.loadfile=loadGame
-  env.dofile=function(path) local f,err=loadGame(path);if not f then error(err,2) end;return f() end
-  env.shell={dir=function()return '' end,setDir=function()end,getRunningProgram=function()return dep.entry end,
-    run=function(path,...)local f,e=loadGame(path);if not f then error(e,2) end;return f(...) end}
-  gameArea.setBackgroundColor(colors.black);gameArea.setTextColor(colors.white);gameArea.clear();gameArea.setCursorPos(1,1)
-  local running=coroutine.create(function()
-    local f,err=loadGame(dep.entry)
-    if not f then error(err) end
-    return f()
-  end)
-  local alive=true;local filter=nil
-  local function step(event)
-    if not alive then return end
-    local ok,v=coroutine.resume(running,unpack(event or {}))
-    if not ok then alive=false;statusText='ERROR: '..tostring(v):sub(1,28);paintBar();return end
-    if coroutine.status(running)=='dead' then alive=false;statusText='FINALIZADO';paintBar();return end
-    filter=v
+  local function safeLoad(path)
+    local n=entryPath(path)
+    local data=n and fileData(n)
+    if not data then return nil,'El archivo no existe en esta preview: '..tostring(path) end
+    return load(data,'@preview/'..n,'t',env)
   end
-  step({})
-  while true do
-    local e={os.pullEventRaw()}
-    if e[1]=='monitor_touch' then e={'mouse_click',1,e[3],e[4]} end
-    local kind=e[1]
-    if kind=='mouse_click' and e[4]<=3 then
-      local x=e[3]
-      if e[4]==2 then
-        if x>=2 and x<=10 then local ok,msg=publish(depId,false);return ok and 'approved' or msg
-        elseif x>=11 and x<=21 then local ok,msg=reject(depId);return ok and 'rejected' or msg
-        elseif x>=22 and x<=29 then return 'exit' end
-      end
-    elseif kind=='key' then
-      if e[2]==keys.f5 then local ok,msg=publish(depId,false);return ok and 'approved' or msg
-      elseif e[2]==keys.f6 then local ok,msg=reject(depId);return ok and 'rejected' or msg
-      elseif e[2]==keys.f7 then return 'exit' end
-    elseif kind=='terminate' then return 'exit' end
-    if alive then
-      if kind=='mouse_click' or kind=='mouse_up' or kind=='mouse_drag' or kind=='mouse_scroll' then
-        if type(e[4])=='number' then
-          if e[4]>=4 then e[4]=e[4]-3 else e={} end
+  env.loadfile=safeLoad
+  env.dofile=function(path) local f,err=safeLoad(path);if not f then error(err,2) end;return f() end
+  local function runFile(path,...)
+    local n=entryPath(path)
+    local prev=currentProg
+    local f,err=safeLoad(path)
+    if not f then return false,err end
+    currentProg=n
+    local ok,res=pcall(f,...)
+    currentProg=prev
+    if not ok then return false,res end
+    return true,res
+  end
+  env.shell={dir=function()return shellDir end,setDir=function(p)
+      local n=entryPath(p);if n and hasDir(n) then shellDir=n end end,
+    resolve=function(p)return entryPath(p) end,
+    getRunningProgram=function()return currentProg end,
+    run=runFile,execute=runFile}
+  env.require=(function()
+    local loaded={}
+    return function(name)
+      if type(name)~='string' or not name:match('^[%w_%.]+$') then error('Modulo no permitido',2) end
+      local path=name:gsub('%.','/')..'.lua'
+      if loaded[name]~=nil then return loaded[name] end
+      local chunk,err=safeLoad(path)
+      if not chunk then error(err,2) end
+      loaded[name]=true
+      local result=chunk(name)
+      if result~=nil then loaded[name]=result end
+      return loaded[name]
+    end
+  end)()
+  env.parallel={}
+  local function parallelRun(all,...)
+    local funcs={...};local tasks={};local live=#funcs
+    for i,f in ipairs(funcs) do
+      if type(f)~='function' then error('parallel: se requieren funciones',2) end
+      tasks[i]={co=coroutine.create(f),filter=nil}
+    end
+    local function resumeTask(i,event)
+      local task=tasks[i];if not task then return false end
+      local ok,res=coroutine.resume(task.co,unpack(event))
+      if not ok then error(res,0) end
+      if coroutine.status(task.co)=='dead' then tasks[i]=nil;live=live-1;return true end
+      task.filter=res;return false
+    end
+    for i=1,#funcs do if resumeTask(i,{}) and not all then return i end end
+    while live>0 do
+      local event={env.os.pullEventRaw()}
+      for i=1,#funcs do
+        local task=tasks[i]
+        if task and (task.filter==nil or task.filter==event[1]) then
+          if resumeTask(i,event) and not all then return i end
         end
       end
-      if #e>0 and (not filter or filter==e[1]) then step(e) end
+    end
+  end
+  env.parallel.waitForAny=function(...)return parallelRun(false,...) end
+  env.parallel.waitForAll=function(...)return parallelRun(true,...) end
+  env.paintutils={}
+  env.paintutils.drawPixel=function(x,y,c)
+    local color=tty.getBackgroundColor();tty.setCursorPos(x,y)
+    if c then tty.setBackgroundColor(c) end;tty.write(' ')
+    tty.setBackgroundColor(color)
+  end
+  env.paintutils.drawLine=function(x1,y1,x2,y2,c)
+    x1=math.floor(x1);y1=math.floor(y1);x2=math.floor(x2);y2=math.floor(y2)
+    local dx=math.abs(x2-x1);local dy=math.abs(y2-y1)
+    local sx=x1<x2 and 1 or -1;local sy=y1<y2 and 1 or -1;local err=dx-dy
+    for _=1,400 do
+      env.paintutils.drawPixel(x1,y1,c);if x1==x2 and y1==y2 then break end
+      local e2=2*err;if e2>-dy then err=err-dy;x1=x1+sx end
+      if e2<dx then err=err+dx;y1=y1+sy end
+    end
+  end
+  env.paintutils.drawBox=function(x1,y1,x2,y2,c)
+    env.paintutils.drawLine(x1,y1,x2,y1,c);env.paintutils.drawLine(x2,y1,x2,y2,c)
+    env.paintutils.drawLine(x2,y2,x1,y2,c);env.paintutils.drawLine(x1,y2,x1,y1,c)
+  end
+  env.paintutils.drawFilledBox=function(x1,y1,x2,y2,c)
+    for y=math.min(y1,y2),math.max(y1,y2) do env.paintutils.drawLine(x1,y,x2,y,c) end
+  end
+  local runner={rows=rows,timers=timers,finished=false,status='LISTO',width=width,height=height}
+  local co=coroutine.create(function()
+    local chunk,err=safeLoad(dep.entry)
+    if not chunk then error(err,0) end
+    return chunk()
+  end)
+  -- Algunos entornos ofrecen debug.sethook; si no, no hay preempcion de CPU.
+  if debug and type(debug.sethook)=='function' then
+    pcall(debug.sethook,co,function() error('Limite de instrucciones de la preview',0) end,'',300000)
+  end
+  runner.filter=nil
+  function runner:step(ev)
+    if self.finished then return end
+    ev=ev or {}
+    if ev[1]=='timer' then self.timers[ev[2]]=nil end
+    if self.filter and self.filter~=ev[1] then return end
+    local ok,res=coroutine.resume(co,unpack(ev))
+    if not ok then
+      self.finished=true;self.status='ERROR: '..tostring(res):sub(1,95)
+    elseif coroutine.status(co)=='dead' then
+      self.finished=true;self.status='JUEGO FINALIZADO'
+    else self.filter=res;self.status='EN EJECUCION' end
+  end
+  function runner:draw(target,top)
+    for y=1,self.height do
+      target.setCursorPos(1,y+top-1)
+      target.blit(rows[y][1],rows[y][2],rows[y][3])
+    end
+  end
+  function runner:close()
+    for id in pairs(timers) do pcall(os.cancelTimer,id);timers[id]=nil end
+    self.finished=true
+  end
+  return runner
+end
+
+-- Previews remotas: un ticket por conexion, acceso solo al desarrollador.
+local function sendPreviewRows(session,full)
+  local runner=session.runner
+  if not runner then return end
+  local packet={}
+  local function flush()
+    if #packet==0 then return end
+    rednet.send(session.sender,{v=1,op='TEST_FRAME',sid=session.sid,
+      rows=packet,status=runner.status},P)
+    packet={}
+  end
+  for y,row in ipairs(runner.rows) do
+    local signature=row[1]..row[2]..row[3]
+    if full or session.last[y]~=signature then
+      session.last[y]=signature
+      packet[#packet+1]={y,row[1],row[2],row[3]}
+      if #packet>=5 then flush() end
+    end
+  end
+  flush()
+  if runner.finished and not session.sentFinish then
+    session.sentFinish=true
+    rednet.send(session.sender,{v=1,op='TEST_FINISHED',sid=session.sid,status=runner.status},P)
+  end
+end
+closePreview=function(session)
+  if not session then return end
+  if session.runner then session.runner:close() end
+  activeTests[session.sid]=nil
+end
+launchPreview=function(sender,acc,q)
+  local dep=db.deployments[tonumber(q.deployment)]
+  local game=dep and db.games[dep.gameId]
+  if not dep or not game or game.owner~=acc.name or not acc.dev or dep.status~='pending' then
+    return response(false,{error='Solo el desarrollador puede probar su preview pendiente'})
+  end
+  local count=0;local replaceSessions={}
+  for _,s in pairs(activeTests) do
+    if s.sender==sender then replaceSessions[#replaceSessions+1]=s else count=count+1 end
+  end
+  for _,s in ipairs(replaceSessions) do closePreview(s) end
+  if count>=2 then return response(false,{error='Servidor de pruebas ocupado (maximo 2 sesiones)'}) end
+  local w,h=tonumber(q.w),tonumber(q.h)
+  if not w or not h then return response(false,{error='Faltan dimensiones del terminal'}) end
+  w,h=math.floor(w),math.floor(h)
+  local runner,err=createPreviewRunner(dep.id,w,h)
+  if not runner then return response(false,{error=err}) end
+  local ticket=sid()
+  local session={sid=ticket,sender=sender,owner=acc.name,runner=runner,
+    deadline=now()+180000,last={},sentFinish=false}
+  activeTests[ticket]=session
+  runner:step({})
+  return response(true,{sid=ticket,w=w,h=h,seconds=180,
+    title=game.title,version=dep.version,finished=runner.finished,status=runner.status})
+end
+local allowedTestEvents={char=true,key=true,key_up=true,paste=true,
+  mouse_click=true,mouse_up=true,mouse_drag=true,mouse_scroll=true}
+local function remoteTestMessage(sender,msg)
+  if type(msg)~='table' or msg.v~=1 or type(msg.sid)~='string' then return end
+  local session=activeTests[msg.sid]
+  if not session or session.sender~=sender then return end
+  if msg.op=='TEST_STOP' then closePreview(session);return end
+  if msg.op=='TEST_REFRESH' then sendPreviewRows(session,true);return end
+  if msg.op~='TEST_INPUT' or now()>session.deadline or session.runner.finished then return end
+  local e=msg.event
+  if type(e)~='table' or not allowedTestEvents[e[1]] then return end
+  if e[1]=='char' then
+    if type(e[2])~='string' or #e[2]~=1 then return end
+  elseif e[1]=='paste' then
+    if type(e[2])~='string' or #e[2]>256 then return end
+  elseif e[1]=='key' or e[1]=='key_up' then
+    if type(e[2])~='number' or e[2]<1 or e[2]>512 or e[2]~=math.floor(e[2]) then return end
+  else
+    if type(e[2])~='number' or type(e[3])~='number' or type(e[4])~='number' then return end
+    if e[3]<1 or e[3]>session.runner.width or e[4]<1 or e[4]>session.runner.height then return end
+    if e[3]~=math.floor(e[3]) or e[4]~=math.floor(e[4]) then return end
+  end
+  session.runner:step(e)
+  sendPreviewRows(session,false)
+end
+
+local function send(sender,id,res) res.v=1;res.req=id;rednet.send(sender,res,P) end
+local function network()
+  rednet.host(P,HOST)
+  print('WORLD SHOP SERVER ONLINE - ID '..os.getComputerID())
+  print('Protocolo: '..P..' | Previews remotas activas: maximo 2')
+  print('Cajero: ID '..cashierCfg.cashierId..' | Enlace automatico')
+  local heartbeat=os.startTimer(1)
+  while true do
+    local ev={os.pullEventRaw()}
+    if ev[1]=='rednet_message' and ev[4]==P then
+      local sender,q=ev[2],ev[3]
+      if type(q)=='table' then
+        if q.op=='TEST_INPUT' or q.op=='TEST_REFRESH' or q.op=='TEST_STOP' then
+          remoteTestMessage(sender,q)
+        elseif type(q.req)=='string' and #q.req<=100 then
+          local key=sender..':'..q.req
+          local res=cache[key]
+          if not res then
+            local ok,ret=pcall(process,sender,q)
+            res=ok and ret or response(false,{error='Fallo del servidor: '..tostring(ret)})
+            cache[key]=res
+            local cnt=0;for _ in pairs(cache) do cnt=cnt+1 end
+            if cnt>300 then cache={} end
+          end
+          send(sender,q.req,res)
+          if q.op=='TEST_START' and res.ok then
+            local test=activeTests[res.sid]
+            if test then sendPreviewRows(test,true) end
+          end
+        end
+      end
+    elseif ev[1]=='timer' then
+      if ev[2]==heartbeat then
+        heartbeat=os.startTimer(1)
+        for _,test in pairs(activeTests) do
+          if now()>=test.deadline then
+            rednet.send(test.sender,{v=1,op='TEST_FINISHED',sid=test.sid,status='TIEMPO AGOTADO (180s)'},P)
+            closePreview(test)
+          end
+        end
+      end
+      for _,test in pairs(activeTests) do
+        if test.runner.timers[ev[2]] then
+          test.runner:step(ev)
+          sendPreviewRows(test,false)
+        end
+      end
+    end
+  end
+end
+
+-- Moderacion local: exactamente el mismo motor aislado que la prueba remota.
+local function reviewGame(depId)
+  local dep=db.deployments[depId]
+  if not dep then return 'Deployment inexistente' end
+  local game=db.games[dep.gameId]
+  if not game then return 'Juego inexistente' end
+  local target=term.current()
+  local w,h=target.getSize()
+  if w<30 or h<11 then return 'Terminal demasiado pequena (minimo 30x11)' end
+  local runner,err=createPreviewRunner(depId,w,h-3)
+  if not runner then return err end
+  local function bar()
+    target.setBackgroundColor(colors.blue);target.setTextColor(colors.white)
+    for y=1,3 do target.setCursorPos(1,y);target.write((' '):rep(w)) end
+    target.setCursorPos(2,1)
+    target.write(('D'..depId..' '..game.title..' v'..dep.version):sub(1,w-2))
+    target.setCursorPos(2,2);target.setBackgroundColor(colors.green);target.write(' APROBAR ')
+    target.setBackgroundColor(colors.red);target.write(' RECHAZAR ')
+    target.setBackgroundColor(colors.gray);target.write(' SALIR ')
+    target.setCursorPos(2,3);target.setBackgroundColor(colors.blue)
+    target.write(('F5 aprobar | F6 rechazar | F7 salir | '..runner.status):sub(1,w-2))
+    target.setBackgroundColor(colors.black);target.setTextColor(colors.white)
+  end
+  local function render() bar();runner:draw(target,4) end
+  runner:step({});render()
+  local reviewTimer=os.startTimer(180)
+  while true do
+    local ev={os.pullEventRaw()};local kind=ev[1]
+    local choice=nil
+    if kind=='terminate' then choice='exit'
+    elseif kind=='term_resize' then choice='exit'
+    elseif kind=='key' then
+      if ev[2]==keys.f5 then choice='approve'
+      elseif ev[2]==keys.f6 then choice='reject'
+      elseif ev[2]==keys.f7 then choice='exit' end
+    elseif kind=='monitor_touch' then ev={'mouse_click',1,ev[3],ev[4]};kind='mouse_click' end
+    if kind=='mouse_click' and ev[4]==2 then
+      if ev[3]>=2 and ev[3]<=10 then choice='approve'
+      elseif ev[3]>=11 and ev[3]<=21 then choice='reject'
+      elseif ev[3]>=22 and ev[3]<=29 then choice='exit' end
+    end
+    if kind=='timer' and ev[2]==reviewTimer then choice='timeout' end
+    if choice then
+      pcall(os.cancelTimer,reviewTimer)
+      runner:close()
+      target.setBackgroundColor(colors.black);target.setTextColor(colors.white)
+      if choice=='approve' then
+        if dep.status~='pending' then return 'No es una preview pendiente' end
+        local ok,msg=publish(depId,false);return ok and 'approved' or msg
+      elseif choice=='reject' then
+        if dep.status~='pending' then return 'No es una preview pendiente' end
+        local ok,msg=reject(depId);return ok and 'rejected' or msg
+      end
+      return choice
+    end
+    if not runner.finished then
+      if kind=='timer' then
+        if runner.timers[ev[2]] then runner:step(ev);render() end
+      elseif kind=='char' or kind=='key' or kind=='key_up' or kind=='paste' then
+        runner:step(ev);render()
+      elseif kind=='mouse_click' or kind=='mouse_up' or kind=='mouse_drag' or kind=='mouse_scroll' then
+        if ev[4]>=4 then ev[4]=ev[4]-3;runner:step(ev);render() end
+      end
     end
   end
 end
