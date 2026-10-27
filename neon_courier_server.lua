@@ -1,15 +1,14 @@
--- CLASSIC DUNGEONS 1.1 | Edicion autoinstalable OFFLINE
--- Bibliotecas incluidas en el propio archivo: no necesita HTTP ni pastebin.
--- Solo escribe en la carpeta classic_dungeons_runtime_1_1/ junto al ejecutable.
+-- CLASSIC DUNGEONS 1.5 | Servidor autoritativo con posiciones validadas
+-- Solo el Core integrado, auto instalacion offline.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root, 'classic_dungeons_runtime_1_1')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_5')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
--- Sin term/peripheral/rednet: toda simulacion ocurre en el servidor.
-local M={VERSION='1.0.0',PROTO='classicdungeons.v1',HOST='classic-dungeons'}
+-- Sin term/peripheral/rednet. Movimiento compartido; combate y mundo en servidor.
+local M={VERSION='1.5.0',PROTO='classicdungeons.v1',HOST='classic-dungeons'}
 local floor,abs,min,max,sqrt,cos,sin,pi=math.floor,math.abs,math.min,math.max,math.sqrt,math.cos,math.sin,math.pi
 local function clamp(v,a,b) return max(a,min(b,v)) end
 local function dst(a,b) return sqrt((a.x-b.x)^2+(a.y-b.y)^2) end
@@ -26,6 +25,16 @@ local function tile(s,x,y)
   x,y=floor(x)+1,floor(y)+1
   if not within(s,x,y) then return '1' end
   return s.grid[y][x]
+end
+-- Recrea una colision de mundo desde un FLOOR en el cliente, sin generar mapa.
+function M.mapFromPacket(packet)
+  local rows=packet and packet.map or {}
+  local grid={}
+  for y,line in ipairs(rows) do
+    grid[y]={}
+    for x=1,#line do grid[y][x]=line:sub(x,x) end
+  end
+  return {w=rows[1] and #rows[1] or 0,h=#rows,grid=grid}
 end
 function M.solid(s,x,y)
   local t=tile(s,x,y)
@@ -200,6 +209,7 @@ function M.addPlayer(s,id,user,class)
     invul=0,meleeCD=0,spellCD=0,keys={},relics=0,revives=0,shield=0}
   if p.class=='CAZADOR' then p.mana=12;p.maxmana=16
   elseif p.class=='MAGO' then p.mana=18;p.maxmana=20;p.hp=85;p.maxhp=85 end
+  p.moveSeq=0 -- Ultima posicion validada por el servidor
   s.players[p.id]=p
   return p
 end
@@ -327,7 +337,7 @@ function M.advance(s)
   s.floor=s.floor+1
   M.generate(s)
   for _,p in pairs(s.players) do
-    p.x,p.y,p.a=s.start.x,s.start.y,0;p.keys={};p.invul=2
+    p.x,p.y,p.a=s.start.x,s.start.y,0;p.keys={};p.moveSeq=0;p.invul=2
     if not p.alive and s.mode~='PVP' then p.alive=true;p.hp=max(35,floor(p.maxhp*.4)) end
     p.hp=min(p.maxhp,p.hp+18);p.mana=min(p.maxmana,p.mana+5)
     p.potions=min(7,p.potions+1);award(p,400+s.floor*45)
@@ -364,6 +374,7 @@ local function movePlayer(s,p,dt)
   M.move(s,p,(cos(p.a)*forward-sin(p.a)*lateral)*speed,
       (sin(p.a)*forward+cos(p.a)*lateral)*speed,.21)
 end
+M.stepMovement=movePlayer  -- Identica logica y colisiones para la prediccion del cliente.
 local function moveMob(s,e,target,dt)
   local dx,dy=target.x-e.x,target.y-e.y;local d=sqrt(dx*dx+dy*dy)
   if d<.75 then
@@ -415,7 +426,8 @@ function M.tick(s,dt)
     p.spellCD=max(0,p.spellCD-dt)
     p.comboTime=max(0,p.comboTime-dt);if p.comboTime==0 then p.combo=0 end
     if p.alive then
-      movePlayer(s,p,dt);living[#living+1]=p
+      -- La posicion llega del cliente y la valida el servidor en mensajes MOVE.
+      living[#living+1]=p
       p.mana=min(p.maxmana,p.mana+dt*.13)
       for _,item in ipairs(s.loot) do
         if not item.claimed and dst(p,item)<.47 and item.kind~='chest' then
@@ -489,7 +501,7 @@ function M.snapshot(s)
   local players={};for id,p in pairs(s.players) do
     players[id]={id=p.id,user=p.user,class=p.class,x=p.x,y=p.y,a=p.a,hp=p.hp,maxhp=p.maxhp,
       mana=floor(p.mana),maxmana=p.maxmana,potions=p.potions,alive=p.alive,respawn=p.respawn,
-      score=p.score,kills=p.kills,coins=p.coins,combo=p.combo,relics=p.relics,revives=p.revives,
+      score=p.score,kills=p.kills,coins=p.coins,combo=p.combo,relics=p.relics,revives=p.revives,moveSeq=p.moveSeq or 0,
       shield=p.shield,armor=p.armor,damageBonus=p.damageBonus}
   end
   local enemies={};for _,e in ipairs(s.enemies) do
@@ -503,54 +515,44 @@ function M.snapshot(s)
     over=s.over,reason=s.reason or '',paused=s.paused,theme=s.theme,exit=s.exit}
 end
 return M
+
 ]=],
   }
   if fs.exists(dest) and not fs.isDir(dest) then
-    error('Classic Dungeons: la ruta de librerias ya existe y no es una carpeta: '..dest,0)
+    error('Classic Dungeons: la ruta de bibliotecas existe y no es carpeta: '..dest,0)
   end
   if not fs.exists(dest) then fs.makeDir(dest) end
-  local installed, repaired=0,0
-  for filename,data in pairs(bundled) do
-    local target=fs.combine(dest,filename)
+  for name,source in pairs(bundled) do
+    local file=fs.combine(dest,name)
     local previous=nil
-    if fs.exists(target) then
-      if fs.isDir(target) then error('Classic Dungeons: conflicto con carpeta '..target,0) end
-      local original=fs.open(target,'r')
-      if not original then error('Classic Dungeons: no se puede leer '..target,0) end
-      previous=original.readAll(); original.close()
+    if fs.exists(file) then
+      if fs.isDir(file) then error('Classic Dungeons: conflicto con '..file,0) end
+      local f=fs.open(file,'r')
+      if f then previous=f.readAll();f.close() end
     end
-    if previous~=data then
-      local tmp=target..'.writing'
-      if fs.exists(tmp) then
-        if fs.isDir(tmp) then error('Classic Dungeons: ruta temporal ocupada '..tmp,0) end
-        fs.delete(tmp)
-      end
-      local output=fs.open(tmp,'w')
-      if not output then error('Classic Dungeons: sin permiso o espacio para '..tmp,0) end
-      output.write(data);output.close()
+    if previous~=source then
+      local tmp=file..'.writing'
+      if fs.exists(tmp) then fs.delete(tmp) end
+      local h=fs.open(tmp,'w')
+      if not h then error('No se pudo escribir '..tmp,0) end
+      h.write(source);h.close()
       local check=fs.open(tmp,'r')
-      if not check then error('Classic Dungeons: no se pudo verificar '..tmp,0) end
-      local valid=check.readAll()==data;check.close()
-      if not valid then error('Classic Dungeons: escritura incompleta de '..filename,0) end
+      if not check then error('No se pudo verificar '..tmp,0) end
+      local good=check.readAll()==source;check.close()
+      if not good then error('Escritura incompleta '..name,0) end
       if previous~=nil then
-        local backup=target..'.backup'
-        local n=1
-        while fs.exists(backup) do
-          n=n+1; backup=target..'.backup'..n
-        end
-        fs.copy(target,backup)
-        if not fs.exists(backup) then error('Classic Dungeons: no se pudo crear backup de '..filename,0) end
-        fs.delete(target)
-        repaired=repaired+1
-      else installed=installed+1 end
-      fs.move(tmp,target)
+        local backup=file..'.backup'
+        local i=1
+        while fs.exists(backup) do i=i+1;backup=file..'.backup'..i end
+        fs.copy(file,backup)
+        fs.delete(file)
+      end
+      fs.move(tmp,file)
     end
   end
   LIB=dest
-  if installed>0 or repaired>0 then
-    print(('[Classic Dungeons] Librerias: %d instaladas, %d reparadas.'):format(installed,repaired))
-  end
  end
+
 
 -- CLASSIC DUNGEONS | Servidor autoritativo World Studios
 -- Rednet + lobby + normal/PvP/Evento MMO + ranking + herramientas admin.
@@ -558,6 +560,7 @@ local ROOT=fs.getDir(shell.getRunningProgram())
 local CORE=assert(loadfile(fs.combine(LIB,'classic_dungeons_core.lua')))()
 local PROTO,HOST=CORE.PROTO,CORE.HOST
 local FRAME=.12;local MAX_NORMAL,MAX_EVENT=4,8
+local NET_VERSION=2 -- Cliente predice movimiento, servidor valida posiciones
 local DATA=fs.combine(ROOT,'classic_server_data')
 if not fs.exists(DATA) then fs.makeDir(DATA) end
 local function readData(name,def)
@@ -636,6 +639,7 @@ local function start()
   for id,c in pairs(clients) do entries[#entries+1]={id=id,user=c.user,class=c.class} end
   mode=(config.mode=='EVENT' and 'EVENT') or mode
   game=CORE.newRun(mode,diff,entries)
+  for _,client in pairs(clients) do client.moveCredit=.45;client.turnCredit=.42 end
   round='RUNNING';tick=0
   all({type='START',mode=mode,diff=diff})
   broadcastFloor()
@@ -661,7 +665,7 @@ local function disconnect(id)
 end
 local function accept(id)
   send(id,{type='ACCEPT',pid=tostring(id),host=host,round=round,mode=mode,
-    players=count(),diff=diff,announcement=announcement})
+    players=count(),diff=diff,announcement=announcement,netVersion=NET_VERSION})
 end
 local function join(id,m)
   local name=tostring(m.user or ''):gsub('[^%w_%-]',''):sub(1,16)
@@ -674,7 +678,7 @@ local function join(id,m)
   local req=tostring(m.mode or '')
   if config.mode=='EVENT' then
     if req~='EVENT' or not acceptEvent or count()>=MAX_EVENT then say(id,'Evento cerrado/lleno');return end
-    clients[id]={user=name,class=class,last=tick,keys={}}
+    clients[id]={user=name,class=class,last=tick,keys={},moveCredit=.45,turnCredit=.42}
     if not host then host=id end
     accept(id)
     if round~='RUNNING' then mode='EVENT';diff='HARD';start()
@@ -684,22 +688,50 @@ local function join(id,m)
   if round=='RUNNING' or round=='OVER' then say(id,'Partida en curso');return end
   local n=count()
   if n==0 and (req=='SINGLE' or req=='HOST') then
-    clients[id]={user=name,class=class,last=tick,keys={}}
+    clients[id]={user=name,class=class,last=tick,keys={},moveCredit=.45,turnCredit=.42}
     host=id;diff=m.diff=='HARD' and 'HARD' or 'NORMAL'
     mode=m.diff=='PVP' and 'PVP' or (req=='SINGLE' and 'SOLO' or 'COOP')
     if mode=='PVP' then diff='HARD' end
     round='LOBBY';accept(id)
     if req=='SINGLE' then start() end
   elseif req=='JOIN' and n>=1 and n<MAX_NORMAL and round=='LOBBY' then
-    clients[id]={user=name,class=class,last=tick,keys={}}
+    clients[id]={user=name,class=class,last=tick,keys={},moveCredit=.45,turnCredit=.42}
     accept(id);send(host,{type='PLAYER_JOINED',user=name,players=count()})
   else say(id,'No hay sala disponible. Crea una primero.') end
 end
 local validKeys={w=true,s=true,a=true,d=true,q=true,c=true}
+local function validNum(v)
+  return type(v)=='number' and v==v and v>-10000 and v<10000
+end
+local function acceptMove(id,msg,p)
+  local client=clients[id]
+  if not client or not game or game.paused or not p.alive then return end
+  if msg.floor~=game.floor then return end
+  local seq=msg.seq
+  if type(seq)~='number' or seq%1~=0 or seq<= (p.moveSeq or 0) or seq>100000000 then return end
+  if not(validNum(msg.x) and validNum(msg.y) and validNum(msg.a)) then return end
+  local dx,dy=msg.x-p.x,msg.y-p.y
+  local distance=math.sqrt(dx*dx+dy*dy)
+  local allowance=(client.moveCredit or .40)+.025
+  -- Freno contra teleportaciones, velocidad excesiva y atravesar muros.
+  local fraction=distance>0 and math.min(1,allowance/distance) or 1
+  dx=dx*fraction;dy=dy*fraction
+  local steps=math.max(1,math.ceil(math.sqrt(dx*dx+dy*dy)/.09))
+  local startX,startY=p.x,p.y
+  for _=1,steps do CORE.move(game,p,dx/steps,dy/steps,.21) end
+  local moved=math.sqrt((p.x-startX)^2+(p.y-startY)^2)
+  client.moveCredit=math.max(0,(client.moveCredit or .40)-moved)
+  local rot=(msg.a-p.a+math.pi)%(math.pi*2)-math.pi
+  local turnLimit=(client.turnCredit or .42)+.035
+  local usedAngle=math.max(-turnLimit,math.min(turnLimit,rot))
+  p.a=(p.a+usedAngle)%(math.pi*2)
+  client.turnCredit=math.max(0,(client.turnCredit or .42)-math.abs(usedAngle))
+  p.moveSeq=seq -- Se refleja en STATE para reconciliar sin lag visual.
+end
 local function handle(id,m)
   if type(m)~='table' or type(m.type)~='string' then return end
   if m.type=='DISCOVER' then
-    send(id,{type='INFO',mode=config.mode,round=round,players=count(),announcement=announcement,open=acceptEvent})
+    send(id,{type='INFO',mode=config.mode,round=round,players=count(),announcement=announcement,open=acceptEvent,netVersion=NET_VERSION})
     return
   elseif m.type=='REQ_LEADERBOARD' then send(id,{type='LEADERBOARD',scores=scores});return
   elseif m.type=='JOIN' then join(id,m);return end
@@ -716,7 +748,9 @@ local function handle(id,m)
   end
   if round~='RUNNING' or not game or not game.players[tostring(id)] then return end
   local p=game.players[tostring(id)]
-  if m.type=='KEY' and validKeys[m.key] and type(m.down)=='boolean' then
+  if m.type=='MOVE' then
+    acceptMove(id,m,p)
+  elseif m.type=='KEY' and validKeys[m.key] and type(m.down)=='boolean' then
     p.keys[m.key]=m.down
   elseif m.type=='ACTION' then
     if tick-(clients[id].lastAction or -100)<1 then return end
@@ -809,6 +843,11 @@ while true do
   elseif event=='key' then adminKey(a)
   elseif event=='timer' and a==timer then
     timer=os.startTimer(FRAME);tick=tick+1;redraw=redraw+1
+    -- Credito de velocidad calculado en servidor, no confiamos en dt enviado.
+    for _,client in pairs(clients) do
+      client.moveCredit=math.min(.78,(client.moveCredit or .45)+2.85*FRAME)
+      client.turnCredit=math.min(.72,(client.turnCredit or .42)+2.5*FRAME)
+    end
     if shutTicks>0 then
       shutTicks=shutTicks-1
       if shutTicks<=0 then
