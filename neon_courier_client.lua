@@ -187,6 +187,15 @@ end)()
 local g=WT.new(term.current())
 local PROTO='neoncourier.v2'
 local ROOT=fs.getDir(shell.getRunningProgram())
+-- WorldTor 2 dibuja las partidas con CC: Graphics, si esta disponible.
+-- Los menus y el multiplayer siguen siendo los originales.
+local makeRenderer
+local renderPath=fs.combine(ROOT,'neon_worldtor2.lua')
+if fs.exists(renderPath) then
+  local loaded=loadfile(renderPath)
+  if loaded then local ok,v=pcall(loaded);if ok and type(v)=='function' then makeRenderer=v end end
+end
+
 local function file(n) return fs.combine(ROOT,n) end
 local function get(n,def)
   local h=fs.open(file(n),'r');if not h then return def end
@@ -202,12 +211,15 @@ local username=usernameData.user or ''
 local friends=get('neon_friends.dat',{})
 local opts=get('neon_options.dat',{music=true,sfx=true,stars=true,particles=true,shake=true})
 local localRecords=get('neon_local.dat',{runs=0,last=0,best=0})
-local speaker=peripheral.find('speaker')
+local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
 local modemNames={}
-for _,name in ipairs(peripheral.getNames()) do
-  if peripheral.hasType(name,'modem') then
-    modemNames[#modemNames+1]=name
-    if not rednet.isOpen(name) then rednet.open(name) end
+if peripheral and rednet and peripheral.getNames and peripheral.hasType
+    and rednet.isOpen and rednet.open then
+  for _,name in ipairs(peripheral.getNames()) do
+    if peripheral.hasType(name,'modem') then
+      modemNames[#modemNames+1]=name
+      if not rednet.isOpen(name) then rednet.open(name) end
+    end
   end
 end
 math.randomseed((os.epoch and os.epoch('utc') or math.floor(os.clock()*1000000)) % 2147483647)
@@ -468,6 +480,20 @@ local function drawRunner(s,myId)
   g:footer();g:flip()
 end
 local function play(server,pid,active,isHost)
+  local renderer=nil
+  local renderTimer=nil
+  local triedRenderer=false
+  local function closeRenderer()
+    if renderer then pcall(function() renderer:close() end);renderer=nil end
+  end
+  local function initRenderer()
+    if triedRenderer or not makeRenderer then return false end
+    triedRenderer=true
+    local ok,r=pcall(makeRenderer,ROOT)
+    if ok and r and r.gfx then renderer=r;renderTimer=os.startTimer(.07);return true end
+    return false
+  end
+
   local run=true
   local current=nil
   local ping=os.startTimer(1)
@@ -486,18 +512,29 @@ local function play(server,pid,active,isHost)
     local e={os.pullEvent()}
     if e[1]=='timer' and e[2]==ping then
       send({type='PING'});ping=os.startTimer(1)
+    elseif e[1]=='timer' and renderTimer and e[2]==renderTimer then
+      if renderer and current then
+        local ok
+        ok=pcall(function() renderer:draw() end)
+        if not ok then closeRenderer();if current then drawRunner(current,pid) end end
+      end
+      if renderer then renderTimer=os.startTimer(.07) else renderTimer=nil end
     elseif e[1]=='timer' and e[2]==musicTimer then
       musicTimer=os.startTimer(.6)
       if active and speaker and opts.music then
         mi=(mi%#notes)+1;pcall(speaker.playNote,'harp',.11,notes[mi])
       end
-    elseif e[1]=='term_resize' then g:resize();if current then drawRunner(current,pid) end
+    elseif e[1]=='term_resize' then
+      if renderer then renderer:resize() else g:resize();if current then drawRunner(current,pid) end end
     elseif e[1]=='rednet_message' and e[2]==server and e[4]==PROTO and type(e[3])=='table' then
       local m=e[3]
       if m.type=='START' then active=true;tone('ready')
       elseif m.type=='STATE' then
         active=true;current=m.state
-        if type(current)=='table' then drawRunner(current,pid) end
+        if type(current)=='table' then
+          if renderer or initRenderer() then renderer:setState(current,pid)
+          else drawRunner(current,pid) end
+        end
       elseif m.type=='PLAYER_JOINED' then
         numPlayers=m.players or numPlayers+1
         if not active then screen('SALA',{'Se unio: '..tostring(m.user or '?'),
@@ -505,10 +542,14 @@ local function play(server,pid,active,isHost)
       elseif m.type=='NOTICE' then
         if not active then screen('AVISO DEL SERVIDOR',{tostring(m.text),'[ESC] Salir'}) end
       elseif m.type=='PAUSE' then
-        if current then current.paused=m.value;drawRunner(current,pid) end
+        if current then
+          current.paused=m.value
+          if renderer then renderer:setState(current,pid) else drawRunner(current,pid) end
+        end
       elseif m.type=='GAME_OVER' then
         local me=current and current.players and (current.players[pid] or current.players[tostring(pid)])
         local score=me and math.floor(me.score or 0) or 0
+        closeRenderer()
         localRecords.runs=(localRecords.runs or 0)+1
         localRecords.last=score
         localRecords.best=math.max(localRecords.best or 0,score)
@@ -525,11 +566,12 @@ local function play(server,pid,active,isHost)
         screen('FINAL DE CARRERA',rows)
         os.pullEvent('key');run=false
       elseif m.type=='SHUTDOWN' then
+        closeRenderer()
         screen('SERVIDOR DESCONECTADO',{m.text or 'Servidor apagado'});sleep(1.5);run=false
       elseif m.type=='RETURN_MENU' or m.type=='CANCEL' then run=false end
     elseif e[1]=='key' then
       local key=e[2]
-      if key==keys.escape then send({type='LEAVE'});return end
+      if key==keys.escape then send({type='LEAVE'});closeRenderer();return end
       if not active then if isHost and key==keys.enter then send({type='START'}) end
       else
         if key==keys.p then send({type='PAUSE'}) else send({type='KEY',key=key,down=true}) end
@@ -545,6 +587,7 @@ local function play(server,pid,active,isHost)
       send({type='ACTION',action='JUMP'})
     end
   end
+  closeRenderer()
   send({type='LEAVE'})
 end
 local function main()
@@ -582,5 +625,7 @@ local function main()
     'WorldTor Engine v'..tostring(WT.version),'WorldTor IN USE'})
 end
 local ok,err=xpcall(main,debug.traceback)
+-- Restauracion de emergencia tras Ctrl+T o un error inesperado.
+if type(term.setGraphicsMode)=='function' then pcall(term.setGraphicsMode,false) end
 term.setBackgroundColor(colors.black);term.setTextColor(colors.white)
 if not ok then term.clear();term.setCursorPos(1,1);printError('NEON COURIER ERROR: '..tostring(err)) end
