@@ -1,9 +1,9 @@
--- CLASSIC DUNGEONS 1.5 | Cliente con movimiento local y red reconciliada
--- Incluye Core + WorldTor3 + renderizador; no requiere Internet.
+-- CLASSIC DUNGEONS 1.6 | Modo 10 FPS + WorldTor 3 optimizado
+-- Un unico archivo cliente, bibliotecas integradas y sin Internet.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root,'classic_dungeons_runtime_1_5')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_6')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
@@ -621,7 +621,7 @@ function R.open(root,scale)
   local gfx,err=WT.new({backend='graphics',mode=2,scale=scale,background='#11151D'})
   if not gfx then return nil,err end
   local self={WT=WT,gfx=gfx,world=nil,floor=nil,snapshot=nil,myId=nil,
-    quality=1,autotune=false,scale=scale,mini=false,frame=0,showFPS=0,
+    quality=2,autotune=false,scale=scale,mini=false,frame=0,showFPS=0,
     camera=nil,sprites={},swing=0}
   function self:setFloor(data)
     if type(data)~='table' or type(data.map)~='table' then return false end
@@ -725,7 +725,7 @@ function R.open(root,scale)
     local by3=h-(z==2 and 9 or 3)
     safeTxt(g,3,by1,('PTS %d  x%d  REL %d'):format(p.score or 0,p.combo or 0,p.relics or 0),'#FCE5A6',z)
     safeTxt(g,3,by2,floorText,'#8EDDEE',z)
-    safeTxt(g,3,by3,('FPS %d Q%d %dx  7:ULTRA 8:HD 9:FAST'):format(
+    safeTxt(g,3,by3,('FPS %d Q%d %dx  META 10 FPS'):format(
       math.floor(fps or 0),world.quality or 1,self.scale or 1),'#A3D9E8',z)
     if s.runes and not s.puzzleDone then
       for _,rune in ipairs(s.runes) do
@@ -758,11 +758,11 @@ function R.open(root,scale)
   end
   function self:render(fps)
     if not self.world then return true end
-    self.world.age=self.world.age+.16
+    self.world.age=self.world.age+.10
     self.world.messageTime=0
-    self.world.flash=math.max(0,(self.world.flash or 0)-.16)
-    self.swing=math.max(0,(self.swing or 0)-.16)
-    self.world.hitFlash=math.max(0,(self.world.hitFlash or 0)-.16)
+    self.world.flash=math.max(0,(self.world.flash or 0)-.10)
+    self.swing=math.max(0,(self.swing or 0)-.10)
+    self.world.hitFlash=math.max(0,(self.world.hitFlash or 0)-.10)
     if self.targetCamera and self.camera then
       local c,t=self.camera,self.targetCamera
       c.x=c.x+(t.x-c.x)*.7;c.y=c.y+(t.y-c.y)*.7
@@ -1271,61 +1271,86 @@ local function createEngine(options)
         return x+w>self.cameraX-m and x<self.cameraX+self.w+m and
             y+h>self.cameraY-m and y<self.cameraY+self.h+m
     end
+
     function self:flip()
         if self._closed then return false,'Motor cerrado' end
-        self.frame=self.frame+1
-        local skips=0;local calls=0
-        local drawn={}
-        local ok,err=pcall(function()
-            for y=1,self.h do
-                local row=self.buf[y];local raw=string.char(unpackValues(row,1,self.w))
-                if raw~=self.front[y] then
-                    drawn[y]=raw
-                else skips=skips+1 end
-            end
-            if self.backend=='ccgraphics' then
-                if type(self.target.setFrozen)=='function' then pcall(self.target.setFrozen,true) end
-                local batch,by={},nil
-                local function flush()
-                    if by and #batch>0 then self.target.drawPixels(0,(by-1)*self.scale,batch);calls=calls+1 end
-                    batch={};by=nil
-                end
-                local function expand(raw)
-                    if self.scale==1 then return raw end
-                    local t={};for x=1,#raw do t[x]=stretch[raw:byte(x)] end
-                    return table.concat(t)
-                end
-                for y=1,self.h do
-                    if drawn[y] then
-                        if not by then by=y elseif (y-1)*self.scale~=((by-1)*self.scale+#batch) then flush();by=y end
-                        local line=expand(drawn[y])
-                        for _=1,self.scale do batch[#batch+1]=line end
-                    else flush() end
-                end
-                flush()
-            else
-                local codes='0123456789abcdef'
-                for y=1,self.h do
-                    if drawn[y] then
-                        local hexes={}
-                        -- color indices are converted to CC blit digits below
-                        for x=1,self.w do local idx=self.buf[y][x]+1;hexes[x]=codes:sub(idx,idx) end
-                        local str=table.concat(hexes)
-                        self.target.setCursorPos(1,y)
-                        self.target.blit(string.rep(' ',self.w),string.rep('0',self.w),str)
-                        calls=calls+1
-                    end
-                end
-            end
-        end)
-        if self.backend=='ccgraphics' and type(self.target.setFrozen)=='function' then
-            pcall(self.target.setFrozen,false)
+    self.frame=self.frame+1
+    local skips,calls=0,0
+    local changed,spans={},{}
+    -- Mantener imagen anterior en CC: Graphics: no se borra la pantalla.
+    -- Comparamos en memoria para transmitir SOLO los pixeles alterados.
+    local ok,err=pcall(function()
+        for y=1,self.h do
+            local raw=string.char(unpackValues(self.buf[y],1,self.w))
+            local previous=self.front[y]
+            if raw~=previous then
+                changed[y]=raw
+                if previous and #previous==#raw then
+                    local left,right=1,self.w
+                    while left<=right and raw:byte(left)==previous:byte(left) do left=left+1 end
+                    while right>=left and raw:byte(right)==previous:byte(right) do right=right-1 end
+                    spans[y]={left,right}
+                else spans[y]={1,self.w} end
+            else skips=skips+1 end
         end
-        if not ok then return false,'Error dibujando CC: Graphics: '..tostring(err) end
-        for y,raw in pairs(drawn) do self.front[y]=raw end
-        self.drawCalls=calls;self.skippedRows=skips
-        return true
+        if self.backend=='ccgraphics' then
+            local frozen=type(self.target.setFrozen)=='function'
+            if frozen then pcall(self.target.setFrozen,true) end
+            local stretchRow=function(raw)
+                if self.scale==1 then return raw end
+                local parts={}
+                for x=1,#raw do parts[x]=stretch[raw:byte(x)] end
+                return table.concat(parts)
+            end
+            -- Bloques de hasta 24 filas FISICAS. setFrozen hace que
+            -- aparezcan TODOS JUNTOS, sin franjas visibles ni parpadeos.
+            local chunkRows=max(1,floor(24/self.scale))
+            local y=1
+            while y<=self.h do
+                local span=spans[y]
+                if not span then
+                    y=y+1
+                else
+                    local last=y;local left,right=span[1],span[2]
+                    while last<self.h and last-y+1<chunkRows and spans[last+1] do
+                        last=last+1
+                        left=min(left,spans[last][1]);right=max(right,spans[last][2])
+                    end
+                    local batch={}
+                    for yy=y,last do
+                        local line=stretchRow(changed[yy]:sub(left,right))
+                        for _=1,self.scale do batch[#batch+1]=line end
+                    end
+                    self.target.drawPixels((left-1)*self.scale,(y-1)*self.scale,batch)
+                    calls=calls+1
+                    y=last+1
+                end
+            end
+            if frozen then pcall(self.target.setFrozen,false) end
+        else
+            local codes='0123456789abcdef'
+            for y=1,self.h do
+                if changed[y] then
+                    local hexes={}
+                    for x=1,self.w do
+                        local idx=self.buf[y][x]+1;hexes[x]=codes:sub(idx,idx)
+                    end
+                    self.target.setCursorPos(1,y)
+                    self.target.blit(string.rep(' ',self.w),string.rep('0',self.w),table.concat(hexes))
+                    calls=calls+1
+                end
+            end
+        end
+    end)
+    -- Nunca dejar la pantalla congelada si drawPixels lanza una excepcion.
+    if self.backend=='ccgraphics' and type(self.target.setFrozen)=='function' then
+        pcall(self.target.setFrozen,false)
     end
+    if not ok then return false,'Error dibujando CC: Graphics: '..tostring(err) end
+    for y,raw in pairs(changed) do self.front[y]=raw end
+    self.drawCalls=calls;self.skippedRows=skips
+    return true
+end
     function self:stats()
         return {backend=self.backend,mode=self.mode,frame=self.frame,
             drawCalls=self.drawCalls,skippedRows=self.skippedRows,w=self.w,h=self.h}
@@ -1615,7 +1640,8 @@ return function(WT)
       age=0,flash=0,hitFlash=0,message='',messageTime=0,won=false,lost=false,
       minimap=false,rays=0,visibleSprites=0,lastDepth={},shots=0,
       autotune=false,lastQualityChange=0}
-    local quality={ [1]={wall=1,floor=1},[2]={wall=2,floor=2},[3]={wall=3,floor=3} }
+    -- Presets adaptados: las paredes mantienen detalle, el suelo usa menos muestras.
+    local quality={ [1]={wall=1,floor=2},[2]={wall=2,floor=3},[3]={wall=3,floor=4} }
     for y,row in ipairs(world.map) do
       for x=1,#row do
         if row:sub(x,x)=='D' then world.doors[(x-1)..':'..(y-1)]=false end
@@ -2026,6 +2052,7 @@ return WT
  end
 
 
+
 -- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 3 + CC: Graphics
 -- Cuenta local, amigos, partidas SOLO/COOP/PVP/EVENT, ranking, sonido, ajustes.
 local ROOT=fs.getDir(shell.getRunningProgram())
@@ -2051,6 +2078,13 @@ local opts=load('classic_options.dat', {music=true,sfx=true,auto=false,minimap=f
 -- El nuevo preset Ultra utiliza todos los pixeles nativos de CC: Graphics.
 if opts.resolutionV14~=true then
   opts.scale=2;opts.quality=2;opts.auto=false;opts.resolutionV14=true
+  save('classic_options.dat',opts)
+end
+
+-- Classic Dungeons 1.6: preset equilibrado aplicado una sola vez por ordenador.
+-- Si ya estabas en ULTRA, priorizamos la fluidez al actualizar.
+if opts.performanceV16~=true then
+  opts.scale=2;opts.quality=2;opts.auto=false;opts.performanceV16=true
   save('classic_options.dat',opts)
 end
 local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
@@ -2196,8 +2230,8 @@ local function settings()
       '[T] Calidad automatica: '..(opts.auto and 'SI' or 'NO'),
       '[V] Minimap inicial: '..(opts.minimap and 'SI' or 'NO'),
       '[1] ULTRA: escala 1 (pixeles nativos)',
-      '[2] HD: escala 2 (2.25x mas detalle que antes)',
-      '[3] Normal: escala 3 (como antes)',
+      '[2] EQUILIBRADO: escala 2 (meta 10 FPS)',
+      '[3] RAPIDO: escala 3 (menos calculos)',
       '[4] Rapido: escala 4',
       'Escala actual: '..(opts.scale or 1),
       '','[ESC] Volver'
@@ -2369,7 +2403,10 @@ local function play(pid,active,isHost)
     return
   end
   local state=nil;local running=true;local started=active
-  local ticker=os.startTimer(.07);local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
+  -- Prediccion cada 0.05 s (~20 Hz); render como MAXIMO cada 0.10 s (~10 Hz).
+  -- Separar ambos evita gastar un fotograma en cada actualizacion de fisicas.
+  local ticker=os.startTimer(.05);local visualTimer=os.startTimer(.10)
+  local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
   local notes={12,15,17,15,10,12,8,10};local note=0
   local lastHp=nil;local lastFloor=0
   local pressed={}
@@ -2515,14 +2552,18 @@ local function play(pid,active,isHost)
     elseif ev=='timer' and a==ping then
       send({type='PING'});ping=os.startTimer(1.4)
     elseif ev=='timer' and a==ticker then
-      ticker=os.startTimer(.07)
+      ticker=os.startTimer(.05)
       if started and state and currentFloor then
         local simNow=nowSeconds()
-        local dt=lastSim and math.max(.01,math.min(.23,simNow-lastSim)) or .07
+        local dt=lastSim and math.max(.01,math.min(.16,simNow-lastSim)) or .05
         lastSim=simNow
         predict(dt)
+      end
+    elseif ev=='timer' and a==visualTimer then
+      visualTimer=os.startTimer(.10)
+      if started and state and currentFloor then
         if renderer then
-          local now=(os.epoch and os.epoch('utc')/1000) or os.clock()
+          local now=nowSeconds()
           local fps=lastRender and (1/math.max(.03,now-lastRender)) or 0
           lastRender=now
           local ok,success,err=pcall(function() return renderer:render(fps) end)
