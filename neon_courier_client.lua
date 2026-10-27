@@ -1,9 +1,10 @@
--- CLASSIC DUNGEONS 1.2 | Autoinstalable · Diagnostico 3D
--- Las bibliotecas estan integradas; NO instala mods de Minecraft.
+-- CLASSIC DUNGEONS 1.3 | Paquete cliente portable
+-- Un archivo basta: instala Core, renderizador y WorldTor 3 INTEGRADO sin Internet.
+-- CC: Graphics es un mod externo y no se instala desde Lua.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root,'classic_dungeons_runtime_1_2')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_3')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
@@ -502,6 +503,7 @@ function M.snapshot(s)
     over=s.over,reason=s.reason or '',paused=s.paused,theme=s.theme,exit=s.exit}
 end
 return M
+
 ]=],
     ['classic_dungeons_renderer.lua']=[=[
 -- CLASSIC DUNGEONS | Adaptador de escenas para WorldTor 3 (CC: Graphics)
@@ -596,7 +598,11 @@ local function safeTxt(g,x,y,msg,col)
   g:text(x,y,tostring(msg or ''):sub(1,n),col or '#ECF0F4',1,true)
 end
 function R.open(root,scale)
-  local WT=assert(loadfile(fs.combine(root,'worldtor3.lua')))()
+  -- WorldTor 3 es un unico modulo integrado, sin dependencias de archivos adicionales.
+  local enginePath=fs.combine(root,'worldtor3.lua')
+  local engineLoader,loadError=loadfile(enginePath)
+  assert(engineLoader,'No se encontro WorldTor integrado en '..enginePath..': '..tostring(loadError))
+  local WT=engineLoader()
   local gfx,err=WT.new({backend='graphics',mode=2,scale=scale or 3,background='#11151D'})
   if not gfx then return nil,err end
   local self={WT=WT,gfx=gfx,world=nil,floor=nil,snapshot=nil,myId=nil,
@@ -757,8 +763,13 @@ function R.open(root,scale)
   return self
 end
 return R
+
 ]=],
-    ['worldtor_engine.lua']=[=[
+    ['worldtor3.lua']=[=[
+-- WorldTor 3 | Classic Dungeons portable edition
+-- Motor 2D/CC: Graphics y motor 3D incluidos en este mismo modulo.
+-- Sin require, sin rutas relativas a shell.getRunningProgram().
+local function loadWorldTor2()
 -- WorldTor 2D Engine v1.0 | CC:Tweaked | sin dependencias
 -- API: loadfile('worldtor_engine.lua')() -> tabla WorldTor
 -- Componentes: doble buffer, sprites, texto, figuras, camara, efectos, animacion intro y sonido.
@@ -1449,25 +1460,8 @@ WT.new=function(target,opts)
 end
 WT.newCanvas=createEngine
 return WT
-]=],
-    ['worldtor3.lua']=[=[
--- WorldTor 3.0 | entrada oficial del motor. Compatible con la API 2D anterior.
-local dir = (shell and shell.getRunningProgram and fs and fs.getDir and fs and fs.combine and fs.combine(fs.getDir(shell.getRunningProgram()), 'classic_dungeons_runtime_1_2')) or ''
-local function filepath(name)
-  if fs and fs.combine then return fs.combine(dir,name) end
-  return name
 end
-local wtFile,why=loadfile(filepath('worldtor_engine.lua'))
-assert(wtFile,'WorldTor 3: falta worldtor_engine.lua: '..tostring(why))
-local WT=wtFile()
-local module,err=loadfile(filepath('worldtor3_3d.lua'))
-assert(module,'WorldTor 3: falta worldtor3_3d.lua: '..tostring(err))
-WT=module()(WT)
-WT.version='3.0.0'
-WT.name='WorldTor 3 / CC: Graphics'
-return WT
-]=],
-    ['worldtor3_3d.lua']=[=[
+local function loadWorldTor3D()
 -- WorldTor 3.0 | renderer 3D 2.5D de texturas para CC: Graphics.
 -- API: local WT=assert(loadfile('worldtor3.lua'))(); local world=WT.new3D(gfx,opts)
 -- Motor: DDA, profundidad, paredes texturizadas, suelos/techos, billboards,
@@ -1922,39 +1916,57 @@ return function(WT)
   end
   return WT
 end
+end
+local WT=loadWorldTor2()
+WT=loadWorldTor3D()(WT)
+WT.version='3.0.1-portable'
+WT.name='WorldTor 3 / CC: Graphics (integrado)'
+return WT
+
 ]=],
+
   }
   if fs.exists(dest) and not fs.isDir(dest) then
-    error('Classic Dungeons: la ruta de bibliotecas existe y no es carpeta: '..dest,0)
+    error('Classic Dungeons: se esperaba una carpeta en '..dest,0)
   end
   if not fs.exists(dest) then fs.makeDir(dest) end
   for name,source in pairs(bundled) do
     local file=fs.combine(dest,name)
-    local previous=nil
+    local prior=nil
     if fs.exists(file) then
-      if fs.isDir(file) then error('Classic Dungeons: conflicto con '..file,0) end
-      local f=fs.open(file,'r')
-      if f then previous=f.readAll();f.close() end
+      if fs.isDir(file) then error('Conflicto: '..file..' es carpeta',0) end
+      local oldFile=fs.open(file,'r')
+      if oldFile then prior=oldFile.readAll();oldFile.close() end
     end
-    if previous~=source then
-      local tmp=file..'.writing'
-      if fs.exists(tmp) then fs.delete(tmp) end
-      local h=fs.open(tmp,'w')
-      if not h then error('No se pudo escribir '..tmp,0) end
-      h.write(source);h.close()
-      local check=fs.open(tmp,'r')
-      if not check then error('No se pudo verificar '..tmp,0) end
-      local good=check.readAll()==source;check.close()
-      if not good then error('Escritura incompleta '..name,0) end
-      if previous~=nil then
+    if prior~=source then
+      local temp=file..'.writing'
+      if fs.exists(temp) then fs.delete(temp) end
+      local fh=fs.open(temp,'w')
+      if not fh then error('No se pudo instalar '..name..' en '..file,0) end
+      fh.write(source);fh.close()
+      local verification=fs.open(temp,'r')
+      if not verification then error('No se pudo verificar '..file,0) end
+      local ok=verification.readAll()==source
+      verification.close()
+      if not ok then error('Escritura incompleta: '..file,0) end
+      -- Back up replaced libraries without touching existing user files outside runtime.
+      if prior~=nil then
         local backup=file..'.backup'
-        local i=1
-        while fs.exists(backup) do i=i+1;backup=file..'.backup'..i end
+        local n=1
+        while fs.exists(backup) do n=n+1;backup=file..'.backup'..n end
         fs.copy(file,backup)
         fs.delete(file)
       end
-      fs.move(tmp,file)
+      fs.move(temp,file)
     end
+  end
+  -- WorldTor is checked immediately, not just when entering a match.
+  local worldtorPath=fs.combine(dest,'worldtor3.lua')
+  local loader,reason=loadfile(worldtorPath)
+  if not loader then error('Error al instalar WorldTor: '..worldtorPath..' - '..tostring(reason),0) end
+  local ok,engine=pcall(loader)
+  if not ok or type(engine)~='table' or type(engine.new3D)~='function' then
+    error('Error al cargar WorldTor integrado: '..tostring(engine),0)
   end
   LIB=dest
  end
@@ -1962,6 +1974,7 @@ end
 -- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 3 + CC: Graphics
 -- Cuenta local, amigos, partidas SOLO/COOP/PVP/EVENT, ranking, sonido, ajustes.
 local ROOT=fs.getDir(shell.getRunningProgram())
+-- WorldTor 3 vive dentro de worldtor3.lua. No requiere cargar ficheros del motor por separado.
 local C=assert(loadfile(fs.combine(LIB,'classic_dungeons_core.lua')))()
 local PROTO=C.PROTO
 local function path(n) return fs.combine(ROOT,n) end
@@ -2147,6 +2160,13 @@ local function testGraphics()
   local ok,err=xpcall(function()
     assert(type(term.setGraphicsMode)=='function' and type(term.drawPixels)=='function',
       'Falta la API term.setGraphicsMode o term.drawPixels: instala CC: Graphics')
+    local wtPath=fs.combine(LIB,'worldtor3.lua')
+    assert(fs.exists(wtPath),'No se pudo instalar WorldTor 3: '..wtPath)
+    local wtLoader,wtError=loadfile(wtPath)
+    assert(wtLoader,'WorldTor 3 no puede abrirse: '..tostring(wtError))
+    local wtOk,wt=pcall(wtLoader)
+    assert(wtOk and type(wt)=='table' and type(wt.new3D)=='function',
+      'WorldTor 3 no puede inicializarse: '..tostring(wt))
     local loader,reason=loadfile(fs.combine(LIB,'classic_dungeons_renderer.lua'))
     assert(loader,reason)
     local R=assert(loader())
