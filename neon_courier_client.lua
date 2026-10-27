@@ -1,11 +1,11 @@
--- CLASSIC DUNGEONS 1.7 | WorldTor 4 Performance Engine
+-- CLASSIC DUNGEONS 1.8 | WorldTor 4 + Audio
 -- Un solo archivo para cliente; WorldTor4 y Core se instalan sin Internet.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
   local dest=fs.combine(root,'classic_dungeons_runtime_4')
   local bundled={
-    ['classic_dungeons_core.lua']=[=[
+    ['classic_dungeons_core.lua']=[==[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
 -- Sin term/peripheral/rednet. Movimiento compartido; combate y mundo en servidor.
 local M={VERSION='1.5.0',PROTO='classicdungeons.v1',HOST='classic-dungeons'}
@@ -515,9 +515,8 @@ function M.snapshot(s)
     over=s.over,reason=s.reason or '',paused=s.paused,theme=s.theme,exit=s.exit}
 end
 return M
-
-]=],
-    ['classic_dungeons_renderer.lua']=[=[
+]==],
+    ['classic_dungeons_renderer.lua']=[==[
 -- CLASSIC DUNGEONS | Adaptador de escenas para WorldTor 4 (CC: Graphics)
 -- Solo renderiza; nunca simula dano, IA ni botin (todo en servidor).
 local R={}
@@ -822,9 +821,8 @@ function R.open(root,scale)
   return self
 end
 return R
-
-]=],
-    ['worldtor4.lua']=[=[
+]==],
+    ['worldtor4.lua']=[==[
 -- WorldTor 4.0 Performance Engine | Classic Dungeons portable edition
 -- Motor 2D/CC: Graphics y motor 3D incluidos en este mismo modulo.
 -- Sin require, sin rutas relativas a shell.getRunningProgram().
@@ -2060,8 +2058,97 @@ WT=loadWorldTor3D()(WT)
 WT.version='4.0.0-performance'
 WT.name='WorldTor 4 / CC: Graphics Performance Engine'
 return WT
-
-]=],
+]==],
+    ['classic_dungeons_audio.lua']=[==[
+-- CLASSIC DUNGEONS | Audio 1.8 | CC:Tweaked speaker
+-- Este modulo no requiere otros addons; no utiliza sleep ni ciclos de espera.
+local Audio={}
+Audio.__index=Audio
+local min,max=math.min,math.max
+local function timestamp()
+  if os.epoch then return os.epoch('utc')/1000 end
+  return os.clock()
+end
+local function speakerFind()
+  if not peripheral or type(peripheral.find)~='function' then return nil end
+  local ok,sp=pcall(peripheral.find,'speaker')
+  return ok and sp or nil
+end
+-- sound, instrumento alternativo, volumen, pitch sonido, nota, cooldown, prioridad
+local EFFECTS={
+  attack={ 'minecraft:entity.player.attack.sweep', 'guitar', .35, 1.15, 9, .18, 3 },
+  spell= { 'minecraft:entity.blaze.shoot', 'bit', .45, 1.20, 19, .22, 4 },
+  hit=   { 'minecraft:entity.player.attack.strong', 'bass', .56, .91, 10, .12, 6 },
+  hurt=  { 'minecraft:entity.player.hurt', 'basedrum', .57, 1.05, 6, .16, 7 },
+  kill=  { 'minecraft:entity.skeleton.death', 'snare', .51, 1.06, 13, .16, 7 },
+  death= { 'minecraft:entity.player.death', 'basedrum', .70, .75, 3, .7, 10 },
+  boss=  { 'minecraft:entity.ender_dragon.growl', 'didgeridoo', .64, .67, 5, 6, 9 },
+  bosskill={ 'minecraft:entity.player.levelup', 'chime', .7, .83, 23, 2, 10 },
+  step=  { 'minecraft:block.stone.step', 'hat', .10, .85, 11, .35, 1 },
+  coin=  { 'minecraft:entity.experience_orb.pickup', 'bell', .30, 1.25, 20, .23, 3 },
+  loot=  { 'minecraft:entity.item.pickup', 'pling', .26, 1.20, 18, .25, 3 },
+  chest= { 'minecraft:block.chest.open', 'harp', .54, 1.10, 18, .37, 6 },
+  relic= { 'minecraft:entity.player.levelup', 'chime', .60, 1.2, 24, .55, 8 },
+  rune=  { 'minecraft:block.enchantment_table.use', 'chime', .54, 1.20, 23, .25, 7 },
+  trap=  { 'minecraft:entity.generic.explode', 'basedrum', .63, .84, 5, .5, 8 },
+  floor= { 'minecraft:entity.enderman.teleport', 'chime', .51, 1.10, 22, .8, 8 },
+  heal=  { 'minecraft:entity.generic.drink', 'bell', .42, 1.20, 20, .33, 5 },
+  revive={ 'minecraft:entity.player.levelup', 'chime', .53, 1.45, 23, 1.1, 8 },
+  ready= { 'minecraft:block.note_block.chime', 'harp', .32, 1.15, 18, .6, 4 },
+  locked={ 'minecraft:block.anvil.land', 'bass', .22, .75, 7, .6, 3 },
+  used=  { 'minecraft:block.note_block.hat', 'hat', .14, 1.0, 13, .25, 2 },
+  empty= { 'minecraft:block.note_block.hat', 'hat', .13, .85, 7, .26, 2 },
+  fail=  { 'minecraft:block.note_block.bass', 'bass', .22, .7, 5, .45, 2 },
+}
+function Audio.new(opts)
+  local self=setmetatable({opts=opts,last={},lastSfx=-100,lastPriority=0,speaker=nil},Audio)
+  if type(opts.sfxVolume)~='number' then opts.sfxVolume=.7 end
+  self:refresh()
+  return self
+end
+function Audio:refresh()
+  self.speaker=speakerFind()
+  return self.speaker~=nil
+end
+function Audio:hasSpeaker() return self.speaker~=nil end
+function Audio:volume()
+  return max(0,min(1,tonumber(self.opts.sfxVolume) or .7))
+end
+function Audio:play(kind)
+  local sound=EFFECTS[kind]
+  if not sound or not self.opts.sfx or self:volume()<=0 then return false end
+  local sp=self.speaker
+  if not sp then return false end
+  local now=timestamp()
+  if self.last[kind] and now-self.last[kind]<sound[6] then return false end
+  if now-self.lastSfx<.095 and sound[7]<self.lastPriority then return false end
+  local loudness=self:volume()*sound[3]
+  local success,accepted=false,false
+  if type(sp.playSound)=='function' then
+    local ok,res=pcall(sp.playSound,sound[1],loudness,sound[4])
+    success,accepted=ok,(ok and res~=false)
+  end
+  if not accepted and type(sp.playNote)=='function' then
+    local ok,res=pcall(sp.playNote,sound[2],loudness,sound[5])
+    success,accepted=ok,(ok and res~=false)
+  end
+  if accepted then
+    self.last[kind]=now
+    self.lastSfx=now
+    self.lastPriority=sound[7]
+    return true
+  end
+  return false
+end
+function Audio:musicNote(note)
+  if not self.opts.music or not self.speaker then return false end
+  if timestamp()-self.lastSfx<.45 then return false end -- los efectos tienen prioridad
+  if type(self.speaker.playNote)~='function' then return false end
+  local ok,res=pcall(self.speaker.playNote,'harp',.075,note)
+  return ok and res~=false
+end
+return Audio
+]==],
   }
   if fs.exists(dest) and not fs.isDir(dest) then error('Ruta no es carpeta: '..dest,0) end
   if not fs.exists(dest) then fs.makeDir(dest) end
@@ -2101,6 +2188,7 @@ return WT
   end
   LIB=dest
  end
+
 
 
 
@@ -2145,7 +2233,9 @@ if opts.performanceV4~=true then
   opts.scale=2;opts.quality=2;opts.auto=true;opts.performanceV4=true
   save('classic_options.dat',opts)
 end
-local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
+local Audio=assert(loadfile(fs.combine(LIB,'classic_dungeons_audio.lua')))()
+local audio=Audio.new(opts)
+local function beep(which) return audio:play(which) end
 local modems={}
 if peripheral and rednet and peripheral.getNames then
   for _,side in ipairs(peripheral.getNames()) do
@@ -2201,14 +2291,6 @@ local function ensureAccount()
   local v=ask('CUENTA DE AVENTURERO','Nombre (max 16):'):gsub('[^%w_%-]',''):sub(1,16)
   username=v~='' and v or ('Aventurero'..os.getComputerID())
   save('classic_account.dat',{user=username})
-end
-local function beep(which)
-  if not opts.sfx or not speaker then return end
-  local sounds={hit={'bass',.42,8},attack={'hat',.12,16},heal={'chime',.55,19},rune={'chime',.4,23},
-    chest={'harp',.6,24},floor={'chime',.75,22},trap={'basedrum',.65,7},empty={'hat',.15,4},
-    ready={'harp',.5,17},revive={'chime',.7,22},fail={'bass',.45,6}}
-  local a=sounds[which] or sounds.attack
-  pcall(function() speaker.playNote(a[1],a[2],a[3]) end)
 end
 local function send(m)
   if serverId and rednet then pcall(rednet.send,serverId,m,PROTO) end
@@ -2284,7 +2366,8 @@ local function settings()
   while true do
     textScreen('CONFIGURACION',{
       '[M] Musica: '..(opts.music and 'SI' or 'NO'),
-      '[S] Sonido: '..(opts.sfx and 'SI' or 'NO'),
+      '[S] Efectos: '..(opts.sfx and 'SI' or 'NO')..' / speaker '..(audio:hasSpeaker() and 'OK' or 'NO'),
+      '[K] Volumen: '..math.floor(audio:volume()*100+.5)..'%  [B] Probar',
       '[T] Calidad automatica: '..(opts.auto and 'SI' or 'NO'),
       '[V] Minimap inicial: '..(opts.minimap and 'SI' or 'NO'),
       '[1] ULTRA: escala 1 (pixeles nativos)',
@@ -2297,7 +2380,11 @@ local function settings()
     local k=keyInput()
     if k==keys.escape then return end
     if k==keys.m then opts.music=not opts.music
-    elseif k==keys.s then opts.sfx=not opts.sfx
+    elseif k==keys.s then opts.sfx=not opts.sfx;audio:refresh();if opts.sfx then beep('ready') end
+    elseif k==keys.b then audio:refresh();beep('chest')
+    elseif k==keys.k then
+      opts.sfxVolume=(math.floor(audio:volume()*4+.5)+1)%5/4
+      beep('coin')
     elseif k==keys.t then opts.auto=not opts.auto
     elseif k==keys.v then opts.minimap=not opts.minimap
     elseif k==keys.one then opts.scale=1
@@ -2467,7 +2554,7 @@ local function play(pid,active,isHost)
   local ticker=os.startTimer(.05);local visualTimer=os.startTimer(.05)
   local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
   local notes={12,15,17,15,10,12,8,10};local note=0
-  local lastHp=nil;local lastFloor=0
+  local lastCombat=nil;local lastFloor=0;local bossAlerted=false
   local pressed={}
   -- Cliente = autoridad visual INMEDIATA; servidor = validacion y mundo.
   local pose,collisionMap=nil,nil
@@ -2493,7 +2580,9 @@ local function play(pid,active,isHost)
     if not pose or not collisionMap or not state or state.paused or not pose.alive then return end
     -- El motor Core comparte EXACTAMENTE las colisiones con el servidor.
     pose.keys=pressed
+    local ox,oy=pose.x,pose.y
     C.stepMovement(collisionMap,pose,dt)
+    if math.abs(pose.x-ox)+math.abs(pose.y-oy)>.003 then beep('step') end
     applyPose()
     local n=nowSeconds()
     local changed=not lastMovePos or math.abs(pose.x-lastMovePos.x)+math.abs(pose.y-lastMovePos.y)+
@@ -2636,14 +2725,15 @@ local function play(pid,active,isHost)
       end
     elseif ev=='timer' and a==melody then
       melody=os.startTimer(.75)
-      if started and opts.music and speaker then
+      if started and opts.music then
         note=note%#notes+1
-        pcall(function() speaker.playNote('harp',.07,notes[note]) end)
+        audio:musicNote(notes[note])
       end
     elseif ev=='rednet_message' and a==serverId and c==PROTO and type(b)=='table' then
       if b.type=='START' then started=true;beep('ready')
       elseif b.type=='FLOOR' then
         currentFloor=b
+        lastCombat=nil;bossAlerted=false
         installFloor(b)
         if not renderer and started and not graphicsFailed then beginGraphics() end
         if renderer then
@@ -2664,8 +2754,29 @@ local function play(pid,active,isHost)
           end
         end
         local me=state.players and state.players[tostring(pid)]
-        if me and lastHp and me.hp<lastHp then beep('hit') end
-        if me then lastHp=me.hp end
+        if me then
+          if lastCombat then
+            local kind=nil
+            if lastCombat.alive and not me.alive then kind='death'
+            elseif lastCombat.bossAlive and not state.bossAlive then kind='bosskill'
+            elseif (me.hp or 0)<(lastCombat.hp or 0) then kind='hurt'
+            elseif (me.kills or 0)>(lastCombat.kills or 0) then kind='kill'
+            elseif (me.relics or 0)>(lastCombat.relics or 0) then kind='relic'
+            elseif (me.potions or 0)>(lastCombat.potions or 0) then kind='loot'
+            elseif (me.coins or 0)>(lastCombat.coins or 0) then kind='coin' end
+            if kind then beep(kind) end
+          end
+          if not bossAlerted then
+            for _,enemy in ipairs(state.enemies or {}) do
+              if enemy.kind=='boss' and
+                (enemy.x-me.x)^2+(enemy.y-me.y)^2<49 then
+                beep('boss');bossAlerted=true;break
+              end
+            end
+          end
+          lastCombat={hp=me.hp,kills=me.kills,coins=me.coins,
+            relics=me.relics,potions=me.potions,alive=me.alive,bossAlive=state.bossAlive}
+        end
       elseif b.type=='PAUSE' then if state then state.paused=b.paused end
       elseif b.type=='ANNOUNCEMENT' then if serverInfo then serverInfo.announcement=b.data end
       elseif b.type=='SFX' then
@@ -2674,6 +2785,7 @@ local function play(pid,active,isHost)
       elseif b.type=='NOTICE' then
         if not started then textScreen('AVISO',{b.text or 'Aviso'}) end
       elseif b.type=='GAME_OVER' then
+        beep('death')
         stopGraphics()
         local entries=b.results or {}
         local mine=state and state.players and state.players[tostring(pid)]
@@ -2714,7 +2826,7 @@ local function play(pid,active,isHost)
           beep('attack');send({type='ACTION',action='MELEE'})
         elseif a==keys.f then
           if renderer then renderer:effect('attack') end
-          send({type='ACTION',action='SPELL'})
+          beep('spell');send({type='ACTION',action='SPELL'})
         elseif a==keys.e then send({type='ACTION',action='INTERACT'})
         elseif a==keys.h then send({type='ACTION',action='POTION'})
         elseif a==keys.r then send({type='ACTION',action='REVIVE'})
@@ -2741,8 +2853,10 @@ local function play(pid,active,isHost)
         pressed[mappings[a]]=nil;send({type='KEY',key=mappings[a],down=false})
       end
     elseif ev=='mouse_click' and started then
-      if a==1 then if renderer then renderer:effect('attack') end;send({type='ACTION',action='MELEE'})
-      elseif a==2 then send({type='ACTION',action='SPELL'}) end
+      if a==1 then if renderer then renderer:effect('attack') end;beep('attack');send({type='ACTION',action='MELEE'})
+      elseif a==2 then beep('spell');send({type='ACTION',action='SPELL'}) end
+    elseif ev=='peripheral' or ev=='peripheral_detach' then
+      audio:refresh()
     elseif ev=='term_resize' and renderer then
       local ok=pcall(function() renderer:resize() end)
       if not ok then graphError('RESOLUCION','No se pudo adaptar la pantalla') end
