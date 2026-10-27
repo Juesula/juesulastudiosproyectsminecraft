@@ -1,10 +1,9 @@
--- CLASSIC DUNGEONS 1.1 | Edicion autoinstalable OFFLINE
--- Bibliotecas incluidas en el propio archivo: no necesita HTTP ni pastebin.
--- Solo escribe en la carpeta classic_dungeons_runtime_1_1/ junto al ejecutable.
+-- CLASSIC DUNGEONS 1.2 | Autoinstalable · Diagnostico 3D
+-- Las bibliotecas estan integradas; NO instala mods de Minecraft.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root, 'classic_dungeons_runtime_1_1')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_2')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
@@ -1453,7 +1452,7 @@ return WT
 ]=],
     ['worldtor3.lua']=[=[
 -- WorldTor 3.0 | entrada oficial del motor. Compatible con la API 2D anterior.
-local dir = (shell and shell.getRunningProgram and fs and fs.getDir and fs.combine and fs.combine(fs.getDir(shell.getRunningProgram()), 'classic_dungeons_runtime_1_1')) or ''
+local dir = (shell and shell.getRunningProgram and fs and fs.getDir and fs and fs.combine and fs.combine(fs.getDir(shell.getRunningProgram()), 'classic_dungeons_runtime_1_2')) or ''
 local function filepath(name)
   if fs and fs.combine then return fs.combine(dir,name) end
   return name
@@ -1926,50 +1925,38 @@ end
 ]=],
   }
   if fs.exists(dest) and not fs.isDir(dest) then
-    error('Classic Dungeons: la ruta de librerias ya existe y no es una carpeta: '..dest,0)
+    error('Classic Dungeons: la ruta de bibliotecas existe y no es carpeta: '..dest,0)
   end
   if not fs.exists(dest) then fs.makeDir(dest) end
-  local installed, repaired=0,0
-  for filename,data in pairs(bundled) do
-    local target=fs.combine(dest,filename)
+  for name,source in pairs(bundled) do
+    local file=fs.combine(dest,name)
     local previous=nil
-    if fs.exists(target) then
-      if fs.isDir(target) then error('Classic Dungeons: conflicto con carpeta '..target,0) end
-      local original=fs.open(target,'r')
-      if not original then error('Classic Dungeons: no se puede leer '..target,0) end
-      previous=original.readAll(); original.close()
+    if fs.exists(file) then
+      if fs.isDir(file) then error('Classic Dungeons: conflicto con '..file,0) end
+      local f=fs.open(file,'r')
+      if f then previous=f.readAll();f.close() end
     end
-    if previous~=data then
-      local tmp=target..'.writing'
-      if fs.exists(tmp) then
-        if fs.isDir(tmp) then error('Classic Dungeons: ruta temporal ocupada '..tmp,0) end
-        fs.delete(tmp)
-      end
-      local output=fs.open(tmp,'w')
-      if not output then error('Classic Dungeons: sin permiso o espacio para '..tmp,0) end
-      output.write(data);output.close()
+    if previous~=source then
+      local tmp=file..'.writing'
+      if fs.exists(tmp) then fs.delete(tmp) end
+      local h=fs.open(tmp,'w')
+      if not h then error('No se pudo escribir '..tmp,0) end
+      h.write(source);h.close()
       local check=fs.open(tmp,'r')
-      if not check then error('Classic Dungeons: no se pudo verificar '..tmp,0) end
-      local valid=check.readAll()==data;check.close()
-      if not valid then error('Classic Dungeons: escritura incompleta de '..filename,0) end
+      if not check then error('No se pudo verificar '..tmp,0) end
+      local good=check.readAll()==source;check.close()
+      if not good then error('Escritura incompleta '..name,0) end
       if previous~=nil then
-        local backup=target..'.backup'
-        local n=1
-        while fs.exists(backup) do
-          n=n+1; backup=target..'.backup'..n
-        end
-        fs.copy(target,backup)
-        if not fs.exists(backup) then error('Classic Dungeons: no se pudo crear backup de '..filename,0) end
-        fs.delete(target)
-        repaired=repaired+1
-      else installed=installed+1 end
-      fs.move(tmp,target)
+        local backup=file..'.backup'
+        local i=1
+        while fs.exists(backup) do i=i+1;backup=file..'.backup'..i end
+        fs.copy(file,backup)
+        fs.delete(file)
+      end
+      fs.move(tmp,file)
     end
   end
   LIB=dest
-  if installed>0 or repaired>0 then
-    print(('[Classic Dungeons] Librerias: %d instaladas, %d reparadas.'):format(installed,repaired))
-  end
  end
 
 -- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 3 + CC: Graphics
@@ -2152,6 +2139,45 @@ local function settings()
     save('classic_options.dat',opts)
   end
 end
+local function testGraphics()
+  local wr=term.getSize()
+  textScreen('PROBANDO CC: GRAPHICS',{'Comprobando API y motor 3D...','', 'La prueba dibujara un fotograma.'})
+  local result=nil
+  local inst=nil
+  local ok,err=xpcall(function()
+    assert(type(term.setGraphicsMode)=='function' and type(term.drawPixels)=='function',
+      'Falta la API term.setGraphicsMode o term.drawPixels: instala CC: Graphics')
+    local loader,reason=loadfile(fs.combine(LIB,'classic_dungeons_renderer.lua'))
+    assert(loader,reason)
+    local R=assert(loader())
+    local e
+    inst,e=R.open(LIB,opts.scale or 3)
+    assert(inst,e)
+    local s=C.newRun('SOLO','NORMAL',{{id='TEST',user='PRUEBA',class='GUERRERO'}})
+    assert(inst:setFloor(C.floorPacket(s)),'No acepta el mapa')
+    inst:setState(C.snapshot(s),'TEST')
+    local drawn,why=inst:render(8)
+    assert(drawn,why)
+    result='OK: WorldTor 3 y CC: Graphics dibujan correctamente'
+  end,function(e)return debug and debug.traceback and debug.traceback(e,2) or tostring(e) end)
+  if inst then pcall(function()inst:close()end)end
+  stopGraphics()
+  if not ok then
+    local f=fs.open(path('classic_graphics_error.txt'),'w')
+    if f then f.write(tostring(err));f.close()end
+    textScreen('FALLO PRUEBA 3D',{
+      'Error exacto guardado en:',
+      'classic_graphics_error.txt',
+      '',tostring(err):sub(1,math.max(15,wr-4)),
+      '','Pulsa cualquier tecla para volver'
+    })
+  else
+    textScreen('PRUEBA 3D CORRECTA',{result,'',
+      'CC: Graphics puede dibujar.',
+      'Pulsa una tecla para volver'})
+  end
+  keyInput()
+end
 local function mainMenu()
   while true do
     discover()
@@ -2165,7 +2191,7 @@ local function mainMenu()
       {'[3] UNIRSE A UNA SALA',colors.lime},
       {'[4] EVENTO GLOBAL (HASTA 8)',colors.yellow},
       {'[5] SALIR',colors.red},'',
-      '[L] Clasificacion  [F] Amigos  [O] Ajustes',
+      '[L] Ranking [F] Amigos [O] Ajustes [G] Test 3D',
       '[U] Cambiar nombre  [R] Reconectar',
       'Mejor marca: '..(localStats.best or 0)..' / Piso '..(localStats.floor or 0)
     },notice)
@@ -2178,6 +2204,7 @@ local function mainMenu()
     elseif k==keys.l then leaderBoard()
     elseif k==keys.f then friendMenu()
     elseif k==keys.o then settings()
+    elseif k==keys.g then testGraphics()
     elseif k==keys.u then username='';ensureAccount()
     end
   end
@@ -2233,8 +2260,8 @@ local function drawFallback(s,id)
     local row={}
     for x=1,width do
       local mx=cx+x-math.floor(width/2)-1
-      local t=map[my] and map[my]:sub(mx,mx) or '#'
-      local chr=t=='X' and '>' or t=='.' and ' ' or '#'
+      local t=map[my] and map[my]:sub(mx,mx) or ''
+      local chr=t=='' and ' ' or t=='X' and '>' or t=='.' and ' ' or '#'
       if mx==cx and my==cy then chr='@' end
       for _,e in ipairs(s.enemies or {}) do
         if math.floor(e.x)+1==mx and math.floor(e.y)+1==my then chr='m' end
@@ -2259,9 +2286,33 @@ local function play(pid,active,isHost)
   local rendererAPI=nil
   local lastRender=nil
   local graphicsFailed=false
+  local fallbackApproved=false
+  local graphicsError=nil
   currentFloor=nil
-  local renderFile=loadfile(fs.combine(LIB,'classic_dungeons_renderer.lua'))
-  if renderFile then local ok,res=pcall(renderFile);if ok and type(res)=='table' then rendererAPI=res end end
+  local renderFile,loadReason=loadfile(fs.combine(LIB,'classic_dungeons_renderer.lua'))
+  if renderFile then
+    local ok,res=pcall(renderFile)
+    if ok and type(res)=='table' and type(res.open)=='function' then rendererAPI=res
+    else graphicsError='No se puede cargar el renderizador: '..tostring(res) end
+  else graphicsError='No se encuentra el renderizador: '..tostring(loadReason) end
+  local function graphError(phase,reason)
+    graphicsFailed=true
+    graphicsError=tostring(phase)..': '..tostring(reason)
+    stopGraphics()
+    local handle=fs.open(path('classic_graphics_error.txt'),'w')
+    if handle then handle.write(graphicsError);handle.close() end
+    local w=term.getSize()
+    textScreen('ERROR 3D - NO ES EL JUEGO',{
+      'No se pudo iniciar WorldTor 3.',
+      '',
+      graphicsError:sub(1,math.max(15,w-4)),
+      'Detalle: classic_graphics_error.txt',
+      '',
+      '[G] REINTENTAR EL 3D',
+      '[B] JUGAR EN TEXTO (OPCIONAL)',
+      '[ESC] SALIR DE LA PARTIDA'
+    })
+  end
   if not started then
     textScreen('SALA MULTIJUGADOR',{
       isHost and 'SALA CREADA - espera a tus amigos' or 'Esperando al anfitrion...',
@@ -2269,23 +2320,27 @@ local function play(pid,active,isHost)
       '[ESC] Salir de la sala','', 'Cada jugador necesita un ordenador y modem.'})
   end
   local function beginGraphics()
-    if renderer or not rendererAPI or graphicsFailed then return end
+    if renderer or graphicsFailed then return end
+    if not rendererAPI then
+      graphError('CARGA',graphicsError or 'Modulo del renderizador ausente')
+      return
+    end
     local ok,r,err=pcall(rendererAPI.open,LIB,opts.scale or 3)
-    if ok and r then
-      renderer=r
-      if currentFloor then renderer:setFloor(currentFloor) end
+    if not ok or not r then
+      graphError('APERTURA',ok and err or r)
+      return
+    end
+    renderer=r
+    local setup,why=xpcall(function()
+      if currentFloor then
+        assert(renderer:setFloor(currentFloor),'El renderizador ha rechazado el piso')
+      end
       renderer.mini=opts.minimap
       if renderer.world then renderer.world.minimap=opts.minimap end
       if state then renderer:setState(state,pid) end
       if not opts.auto then renderer:qualityLevel(opts.quality or 2) end
-    else
-      graphicsFailed=true
-      stopGraphics()
-      textScreen('CC: GRAPHICS NO DISPONIBLE',{
-        'Se usara el mapa de caracteres.',
-        'Instala CC: Graphics para jugar en 3D.',
-        'Error: '..tostring(err or r):sub(1,38)})
-    end
+    end,function(e) return debug and debug.traceback and debug.traceback(e,2) or tostring(e) end)
+    if not setup then graphError('PREPARACION',why) end
   end
   while running do
     local ev,a,b,c=os.pullEventRaw()
@@ -2302,11 +2357,11 @@ local function play(pid,active,isHost)
           local ok,success,err=pcall(function() return renderer:render(fps) end)
           if not ok or success==false then
             local reason=not ok and success or err
-            graphicsFailed=true
-            stopGraphics()
-            textScreen('ERROR GRAFICO - MODO TEXTO',{'WorldTor 3: '..tostring(reason):sub(1,42)})
+            graphError('DIBUJO',reason)
           end
-        else drawFallback(state,pid) end
+        elseif fallbackApproved then
+          drawFallback(state,pid)
+        end
       end
     elseif ev=='timer' and a==melody then
       melody=os.startTimer(.75)
@@ -2318,18 +2373,21 @@ local function play(pid,active,isHost)
       if b.type=='START' then started=true;beep('ready')
       elseif b.type=='FLOOR' then
         currentFloor=b
-        if not renderer and started then beginGraphics() end
+        if not renderer and started and not graphicsFailed then beginGraphics() end
         if renderer then
-          local ok,reason=pcall(function() renderer:setFloor(b) end)
-          if not ok then graphicsFailed=true;stopGraphics();textScreen('ERROR DE MAPA',{tostring(reason)}) end
+          local ok,accepted=pcall(function() return renderer:setFloor(b) end)
+          if not ok or accepted==false then graphError('MAPA',accepted) end
         end
         lastFloor=b.floor;beep('floor')
         if renderer and state and state.floor==b.floor then renderer:setState(state,pid) end
       elseif b.type=='STATE' then
         state=b;started=true
         if currentFloor and currentFloor.floor==state.floor then
-          if not renderer then beginGraphics() end
-          if renderer then renderer:setState(state,pid) end
+          if not renderer and not graphicsFailed then beginGraphics() end
+          if renderer then
+            local ok,e=pcall(function() renderer:setState(state,pid) end)
+            if not ok then graphError('ESTADO',e) end
+          end
         end
         local me=state.players and state.players[tostring(pid)]
         if me and lastHp and me.hp<lastHp then beep('hit') end
@@ -2363,6 +2421,15 @@ local function play(pid,active,isHost)
       end
     elseif ev=='key' then
       if a==keys.escape then running=false
+      elseif graphicsFailed and not fallbackApproved then
+        if a==keys.g then
+          graphicsFailed=false
+          graphicsError=nil
+          beginGraphics()
+        elseif a==keys.b then
+          fallbackApproved=true
+          if state and currentFloor then drawFallback(state,pid) end
+        end
       elseif not started then
         if isHost and a==keys.enter then send({type='START'}) end
       else
@@ -2390,7 +2457,7 @@ local function play(pid,active,isHost)
       elseif a==2 then send({type='ACTION',action='SPELL'}) end
     elseif ev=='term_resize' and renderer then
       local ok=pcall(function() renderer:resize() end)
-      if not ok then stopGraphics() end
+      if not ok then graphError('RESOLUCION','No se pudo adaptar la pantalla') end
     end
   end
   stopGraphics()
