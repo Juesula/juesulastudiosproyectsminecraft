@@ -1,9 +1,9 @@
--- CLASSIC DUNGEONS 1.6 | Modo 10 FPS + WorldTor 3 optimizado
--- Un unico archivo cliente, bibliotecas integradas y sin Internet.
+-- CLASSIC DUNGEONS 1.7 | WorldTor 4 Performance Engine
+-- Un solo archivo para cliente; WorldTor4 y Core se instalan sin Internet.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root,'classic_dungeons_runtime_1_6')
+  local dest=fs.combine(root,'classic_dungeons_runtime_4')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
@@ -518,7 +518,7 @@ return M
 
 ]=],
     ['classic_dungeons_renderer.lua']=[=[
--- CLASSIC DUNGEONS | Adaptador de escenas para WorldTor 3 (CC: Graphics)
+-- CLASSIC DUNGEONS | Adaptador de escenas para WorldTor 4 (CC: Graphics)
 -- Solo renderiza; nunca simula dano, IA ni botin (todo en servidor).
 local R={}
 local max,floor=math.max,math.floor
@@ -613,15 +613,15 @@ local function safeTxt(g,x,y,msg,col,zoom)
 end
 function R.open(root,scale)
   scale=math.max(1,math.min(4,math.floor(tonumber(scale) or 1)))
-  -- All WorldTor 3 code is bundled in one module; no external paths.
-  local enginePath=fs.combine(root,'worldtor3.lua')
+  -- All WorldTor 4 code is bundled in one module; no external paths.
+  local enginePath=fs.combine(root,'worldtor4.lua')
   local loader,reason=loadfile(enginePath)
-  assert(loader,'WorldTor 3 no encontrado: '..enginePath..' / '..tostring(reason))
+  assert(loader,'WorldTor 4 no encontrado: '..enginePath..' / '..tostring(reason))
   local WT=loader()
   local gfx,err=WT.new({backend='graphics',mode=2,scale=scale,background='#11151D'})
   if not gfx then return nil,err end
   local self={WT=WT,gfx=gfx,world=nil,floor=nil,snapshot=nil,myId=nil,
-    quality=2,autotune=false,scale=scale,mini=false,frame=0,showFPS=0,
+    quality=2,autotune=true,scale=scale,mini=false,frame=0,showFPS=0,
     camera=nil,sprites={},swing=0}
   function self:setFloor(data)
     if type(data)~='table' or type(data.map)~='table' then return false end
@@ -725,7 +725,7 @@ function R.open(root,scale)
     local by3=h-(z==2 and 9 or 3)
     safeTxt(g,3,by1,('PTS %d  x%d  REL %d'):format(p.score or 0,p.combo or 0,p.relics or 0),'#FCE5A6',z)
     safeTxt(g,3,by2,floorText,'#8EDDEE',z)
-    safeTxt(g,3,by3,('FPS %d Q%d %dx  META 10 FPS'):format(
+    safeTxt(g,3,by3,('FPS %d Q%d %dx  META 20 FPS'):format(
       math.floor(fps or 0),world.quality or 1,self.scale or 1),'#A3D9E8',z)
     if s.runes and not s.puzzleDone then
       for _,rune in ipairs(s.runes) do
@@ -758,11 +758,11 @@ function R.open(root,scale)
   end
   function self:render(fps)
     if not self.world then return true end
-    self.world.age=self.world.age+.10
+    self.world.age=self.world.age+.05
     self.world.messageTime=0
-    self.world.flash=math.max(0,(self.world.flash or 0)-.10)
-    self.swing=math.max(0,(self.swing or 0)-.10)
-    self.world.hitFlash=math.max(0,(self.world.hitFlash or 0)-.10)
+    self.world.flash=math.max(0,(self.world.flash or 0)-.05)
+    self.swing=math.max(0,(self.swing or 0)-.05)
+    self.world.hitFlash=math.max(0,(self.world.hitFlash or 0)-.05)
     if self.targetCamera and self.camera then
       local c,t=self.camera,self.targetCamera
       c.x=c.x+(t.x-c.x)*.7;c.y=c.y+(t.y-c.y)*.7
@@ -824,8 +824,8 @@ end
 return R
 
 ]=],
-    ['worldtor3.lua']=[=[
--- WorldTor 3 | Classic Dungeons portable edition
+    ['worldtor4.lua']=[=[
+-- WorldTor 4.0 Performance Engine | Classic Dungeons portable edition
 -- Motor 2D/CC: Graphics y motor 3D incluidos en este mismo modulo.
 -- Sin require, sin rutas relativas a shell.getRunningProgram().
 local function loadWorldTor2()
@@ -1641,7 +1641,8 @@ return function(WT)
       minimap=false,rays=0,visibleSprites=0,lastDepth={},shots=0,
       autotune=false,lastQualityChange=0}
     -- Presets adaptados: las paredes mantienen detalle, el suelo usa menos muestras.
-    local quality={ [1]={wall=1,floor=2},[2]={wall=2,floor=3},[3]={wall=3,floor=4} }
+    -- WorldTor 4: 3 presets coherentes; reducen rayos sin reducir la dimension del HUD.
+    local quality={ [1]={wall=2,floor=3},[2]={wall=3,floor=5},[3]={wall=4,floor=7} }
     for y,row in ipairs(world.map) do
       for x=1,#row do
         if row:sub(x,x)=='D' then world.doors[(x-1)..':'..(y-1)]=false end
@@ -1848,103 +1849,140 @@ return function(WT)
         for xx=max(1,x),x2 do row[xx]=color end
       end
     end
-    local function renderFloor(self,p,dx,dy,planeX,planeY,w,h,horizon,spacing)
-      local ray0x,ray0y=dx-planeX,dy-planeY
-      local ray1x,ray1y=dx+planeX,dy+planeY
-      for y=horizon+1,h,spacing do
-        local depth=(h*.5)/max(1,y-horizon)
-        for x=1,w,spacing do
-          local t=(x-1)/max(1,w-1)
-          local worldx=p.x+depth*(ray0x+(ray1x-ray0x)*t)
-          local worldy=p.y+depth*(ray0y+(ray1y-ray0y)*t)
-          local shade=self:shade(worldx,worldy,depth,0)
-          local floorMaterial=self:tile(worldx,worldy)=='X' and 'X' or 'F'
-          local ix=floor(worldx*32);local iy=floor(worldy*32)
-          local floorColor=sample(floorMaterial,ix,iy,shade)
-          local ceilingColor=sample('C',ix,iy,shade)
-          local blockH=min(spacing,h-y+1)
-          paint(self.gfx,x,y,min(spacing,w-x+1),blockH,floorColor)
-          local ceilingY=h-y-blockH+2
-          paint(self.gfx,x,ceilingY,min(spacing,w-x+1),blockH,ceilingColor)
+
+-- WORLDTOR 4 FAST PATH
+-- El render 3D escribe indices de paleta DIRECTAMENTE al framebuffer.
+-- Se evitan calculos RGB, operaciones trigonometricas y llamadas a la
+-- terminal por pixel. Los objetos y el HUD siguen dibujandose normalmente.
+local function renderFloor(self,p,dx,dy,planeX,planeY,w,h,horizon,spacing)
+  local gfx=self.gfx
+  local ray0x,ray0y=dx-planeX,dy-planeY
+  local rayStepX,rayStepY=planeX*2,planeY*2
+  -- Cada franja se calcula una vez; techo y suelo aparecen juntos
+  -- cuando gfx:flip realiza el commit del frame completo.
+  for y=horizon+1,h,spacing do
+    local blockH=min(spacing,h-y+1)
+    local depth=(h*.5)/max(1,y-horizon)
+    local stepx=depth*rayStepX*spacing/max(1,w-1)
+    local stepy=depth*rayStepY*spacing/max(1,w-1)
+    local wx=p.x+depth*ray0x
+    local wy=p.y+depth*ray0y
+    -- Niebla por distancia; para el suelo lejano se omiten las luces
+    -- puntuales, que antes calculaban sqrt una y otra vez por pixel.
+    local shade=limit(floor(depth*.52+.5),0,7)
+    local ceilingY=h-y-blockH+2
+    local floorEnd=min(h,y+blockH-1)
+    local roofStart=max(1,ceilingY)
+    local roofEnd=min(h,ceilingY+blockH-1)
+    for x=1,w,spacing do
+      local tx=floor(wx*32);local ty=floor(wy*32)
+      local t=self:tile(wx,wy)
+      local mat=t=='X' and 'X' or 'F'
+      local a=sample(mat,tx,ty,shade)
+      local b=sample('C',tx,ty,shade)
+      local right=min(w,x+spacing-1)
+      if a then
+        for yy=y,floorEnd do
+          local row=gfx.buf[yy]
+          for xx=x,right do row[xx]=a end
+        end
+      end
+      if b then
+        for yy=roofStart,roofEnd do
+          local row=gfx.buf[yy]
+          for xx=x,right do row[xx]=b end
+        end
+      end
+      wx=wx+stepx;wy=wy+stepy
+    end
+  end
+end
+local function renderWalls(self,p,dx,dy,planeX,planeY,w,h,horizon,step)
+  self.rays=0
+  local gfx=self.gfx
+  local invW=2/w
+  for x=1,w,step do
+    local camx=(x-1+step*.5)*invW-1
+    local rx,ry=dx+planeX*camx,dy+planeY*camx
+    local d,mat,side,u=self:ray(p.x,p.y,rx,ry,self.far)
+    local span=min(step,w-x+1)
+    if mat then
+      local height=min(h*5,max(1,floor(h/max(.07,d))))
+      local top=floor(horizon-height/2)
+      local bottom=top+height-1
+      local shade=self:shade(p.x+d*rx,p.y+d*ry,d,side)
+      local colX=limit(floor(u*32),0,31)
+      local y0=max(1,top);local y1=min(h,bottom)
+      for y=y0,y1 do
+        local ty=limit(floor((y-top)*32/height),0,31)
+        local color=sample(mat,colX,ty,shade)
+        if color then
+          local row=gfx.buf[y]
+          for xx=x,x+span-1 do row[xx]=color end
         end
       end
     end
-    local function renderWalls(self,p,dx,dy,planeX,planeY,w,h,horizon,step)
-      self.rays=0
-      for x=1,w,step do
-        local camx=2*((x-1+.5*step)/w)-1
-        local rx,ry=dx+planeX*camx,dy+planeY*camx
-        local d,material,side,u=self:ray(p.x,p.y,rx,ry,self.far)
-        local height=min(h*5,max(1,floor(h/max(.07,d))))
-        local top=floor(horizon-height/2)
-        local bottom=top+height-1
-        if material then
-          local hx=p.x+d*rx;local hy=p.y+d*ry
-          local shade=self:shade(hx,hy,d,side)
-          local colX=limit(floor(u*32),0,31)
-          local y0=max(1,top);local y1=min(h,bottom)
-          for y=y0,y1 do
-            local texY=limit(floor(((y-top)/height)*32),0,31)
-            local c=sample(material,colX,texY,shade)
-            paint(self.gfx,x,y,min(step,w-x+1),1,c)
-          end
+    for off=x,x+span-1 do self.lastDepth[off]=d end
+    self.rays=self.rays+1
+  end
+end
+local function renderEntities(self,p,dx,dy,planeX,planeY,w,h,horizon)
+  local det=planeX*dy-dx*planeY
+  if abs(det)<.00001 then return end
+  local inv=1/det
+  local arr={}
+  for _,e in ipairs(self.entities) do
+    if not e.picked and (e.kind~='enemy' or e.hp>0) then
+      local vx,vy=e.x-p.x,e.y-p.y
+      local z=inv*(-planeY*vx+planeX*vy)
+      if z>.15 and z<self.far then
+        local sx=inv*(dy*vx-dx*vy)
+        local center=floor((w*.5)*(1+sx/z))
+        local size=max(1,min(h*4,floor(h/z*.72)))
+        if center+size*.5>=1 and center-size*.5<=w then
+          arr[#arr+1]={e=e,z=z,cx=center,size=size,dist2=vx*vx+vy*vy}
         end
-        for off=0,step-1 do if x+off<=w then self.lastDepth[x+off]=d end end
-        self.rays=self.rays+1
       end
     end
-    local function renderEntities(self,p,dx,dy,planeX,planeY,w,h,horizon)
-      local det=planeX*dy-dx*planeY
-      if abs(det)<.00001 then return end
-      local inv=1/det
-      local arr={}
-      for _,e in ipairs(self.entities) do
-        if not e.picked and (e.kind~='enemy' or e.hp>0) then
-          local vx,vy=e.x-p.x,e.y-p.y
-          local z=inv*(-planeY*vx+planeX*vy)
-          if z>.15 and z<self.far then
-            local sx=inv*(dy*vx-dx*vy)
-            local center=floor((w/2)*(1+sx/z))
-            local size=max(1,min(h*4,floor(h/z*.72)))
-            if center+size/2>=1 and center-size/2<=w then
-              arr[#arr+1]={e=e,z=z,cx=center,size=size,dist2=vx*vx+vy*vy}
-            end
-          end
-        end
-      end
-      table.sort(arr,function(a,b) return a.dist2>b.dist2 end)
-      self.visibleSprites=0
-      for _,o in ipairs(arr) do
-        local texName=o.e.texture or (o.e.kind=='enemy' and 'M' or o.e.kind=='medkit' and 'H' or 'A')
-        local width=max(1,floor(o.size*.7))
-        local x0=floor(o.cx-width/2)
-        local y0=floor(horizon-o.size/2)
-        local shade=self:shade(o.e.x,o.e.y,o.z,0)
-        for x=max(1,x0),min(w,x0+width-1) do
-          if o.z<(self.lastDepth[x] or 1e20)-.04 then
-            local tx=limit(floor((x-x0)/width*16),0,15)
-            for y=max(1,y0),min(h,y0+o.size-1) do
-              local ty=limit(floor((y-y0)/o.size*16),0,15)
-              local c=sample(texName,tx,ty,shade)
-              if c then
-                if o.e.hurt and o.e.hurt>0 then c=WT.colorIndex('#F5D4C7',self.gfx.mode) end
-                paint(self.gfx,x,y,1,1,c)
+  end
+  table.sort(arr,function(a,b) return a.dist2>b.dist2 end)
+  self.visibleSprites=0
+  local gfx=self.gfx
+  local stride=self.quality>=3 and 3 or self.quality==2 and 2 or 1
+  for _,o in ipairs(arr) do
+    local texName=o.e.texture or (o.e.kind=='enemy' and 'M' or o.e.kind=='medkit' and 'H' or 'A')
+    local width=max(1,floor(o.size*.7))
+    local x0=floor(o.cx-width/2)
+    local y0=floor(horizon-o.size/2)
+    local shade=self:shade(o.e.x,o.e.y,o.z,0)
+    local hurt=o.e.hurt and o.e.hurt>0
+    for x=max(1,x0),min(w,x0+width-1),stride do
+      if o.z<(self.lastDepth[x] or 1e20)-.04 then
+        local tx=limit(floor((x-x0)*16/width),0,15)
+        for y=max(1,y0),min(h,y0+o.size-1),stride do
+          local ty=limit(floor((y-y0)*16/o.size),0,15)
+          local c=sample(texName,tx,ty,shade)
+          if c then
+            if hurt then c=WT.colorIndex('#F5D4C7',gfx.mode) end
+            local toY=min(h,y+stride-1)
+            local toX=min(w,x+stride-1)
+            for yy=y,toY do
+              local row=gfx.buf[yy]
+              for xx=x,toX do
+                if o.z<(self.lastDepth[xx] or 1e20)-.04 then row[xx]=c end
               end
             end
           end
         end
-        self.visibleSprites=self.visibleSprites+1
       end
     end
+    self.visibleSprites=self.visibleSprites+1
+  end
+end
     function world:render(fps)
-      if self.autotune and (self.age-self.lastQualityChange)>3 then
-        if (fps or 0)<6.5 and self.quality<3 then
-          self:qualityLevel(self.quality+1)
-        elseif (fps or 0)>9.5 and self.quality>1 then
-          self:qualityLevel(self.quality-1)
-        end
-        self.lastQualityChange=self.age
-      end
+      local startMs=(os.epoch and os.epoch('utc')) or os.clock()*1000
+      -- El ajuste ocurre despues del frame usando su COSTE REAL, no el FPS
+      -- recibido de Rednet. No cambia de escala ni reinicia el modo grafico.
       local gfx=self.gfx;local w,h=gfx.w,gfx.h
       if w<24 or h<22 then
         gfx:clear('#121823');gfx:text(2,3,'AMPLIA LA PANTALLA','#F7C385',1,true)
@@ -1962,7 +2000,7 @@ return function(WT)
       renderEntities(self,p,dx,dy,planeX,planeY,w,h,horizon)
       -- HUD + crosshair + arma calculados por WorldTor.
       gfx:fill(1,1,w,8,'#101A2B',true)
-      gfx:text(2,2,w>=85 and 'WORLDTOR 3' or 'WT3','#A5EBFE',1,true)
+      gfx:text(2,2,w>=85 and 'WORLDTOR 4' or 'WT4','#A5EBFE',1,true)
       gfx:text(max(2,w-27),2,'FPS'..floor(fps or 0),'#81E5CD',1,true)
       local mx,my=floor(w/2),floor(h/2)
       gfx:line(mx-3,my,mx-1,my,'#EDF2DF',true);gfx:line(mx+1,my,mx+3,my,'#EDF2DF',true)
@@ -1993,10 +2031,23 @@ return function(WT)
         gfx:center(floor(h*.3)+12,'R = REINICIAR','#FDE4B7',1)
       end
       if self.beforeFlip then self:beforeFlip(fps) end
-      return gfx:flip()
+      local success,reason=gfx:flip()
+      local nowMs=(os.epoch and os.epoch('utc')) or os.clock()*1000
+      local cost=max(0,nowMs-startMs)
+      self.frameMs=cost
+      self.avgFrameMs=self.avgFrameMs and (self.avgFrameMs*.83+cost*.17) or cost
+      self.perfFrames=(self.perfFrames or 0)+1
+      if self.autotune and self.perfFrames>=16 and (nowMs-(self.perfChanged or 0))>1800 then
+        if self.avgFrameMs>48 and self.quality<3 then
+          self:qualityLevel(self.quality+1);self.perfChanged=nowMs
+        elseif self.avgFrameMs<24 and self.quality>1 then
+          self:qualityLevel(self.quality-1);self.perfChanged=nowMs
+        end
+      end
+      return success,reason
     end
     function world:stats()
-      return {rays=self.rays,sprites=self.visibleSprites,quality=self.quality,frame=self.gfx.frame,autotune=self.autotune}
+      return {rays=self.rays,sprites=self.visibleSprites,quality=self.quality,frame=self.gfx.frame,autotune=self.autotune,frameMs=self.frameMs or 0,avgFrameMs=self.avgFrameMs or 0,drawCalls=self.gfx.drawCalls or 0}
     end
     assert(world:canStand(world.player.x,world.player.y,.2),'WorldTor3: jugador dentro de pared')
     return world
@@ -2006,8 +2057,8 @@ end
 end
 local WT=loadWorldTor2()
 WT=loadWorldTor3D()(WT)
-WT.version='3.0.2-ultra'
-WT.name='WorldTor 3 / CC: Graphics (integrado)'
+WT.version='4.0.0-performance'
+WT.name='WorldTor 4 / CC: Graphics Performance Engine'
 return WT
 
 ]=],
@@ -2041,22 +2092,23 @@ return WT
       fs.move(temp,file)
     end
   end
-  local wtFile=fs.combine(dest,'worldtor3.lua')
+  local wtFile=fs.combine(dest,'worldtor4.lua')
   local loader,reason=loadfile(wtFile)
-  if not loader then error('WorldTor 3 no pudo abrirse: '..tostring(reason),0) end
+  if not loader then error('WorldTor 4 no pudo abrirse: '..tostring(reason),0) end
   local ok,wt=pcall(loader)
   if not ok or type(wt)~='table' or type(wt.new3D)~='function' then
-    error('WorldTor 3 no pudo iniciarse: '..tostring(wt),0)
+    error('WorldTor 4 no pudo iniciarse: '..tostring(wt),0)
   end
   LIB=dest
  end
 
 
 
--- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 3 + CC: Graphics
+
+-- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 4 + CC: Graphics
 -- Cuenta local, amigos, partidas SOLO/COOP/PVP/EVENT, ranking, sonido, ajustes.
 local ROOT=fs.getDir(shell.getRunningProgram())
--- WorldTor 3 vive dentro de worldtor3.lua. No requiere cargar ficheros del motor por separado.
+-- WorldTor 4 vive dentro de worldtor4.lua. No requiere cargar ficheros del motor por separado.
 local C=assert(loadfile(fs.combine(LIB,'classic_dungeons_core.lua')))()
 local PROTO=C.PROTO
 local function path(n) return fs.combine(ROOT,n) end
@@ -2074,7 +2126,7 @@ local username=account.user or ''
 local friends=load('classic_friends.dat',{})
 local localStats=load('classic_local.dat',{runs=0,best=0,last=0,kills=0,floor=0})
 local opts=load('classic_options.dat', {music=true,sfx=true,auto=false,minimap=false,scale=2,quality=2})
--- Migracion unica: las opciones de WorldTor 3 anteriores usaban escala 3.
+-- Migracion unica: las opciones de WorldTor 4 anteriores usaban escala 3.
 -- El nuevo preset Ultra utiliza todos los pixeles nativos de CC: Graphics.
 if opts.resolutionV14~=true then
   opts.scale=2;opts.quality=2;opts.auto=false;opts.resolutionV14=true
@@ -2085,6 +2137,12 @@ end
 -- Si ya estabas en ULTRA, priorizamos la fluidez al actualizar.
 if opts.performanceV16~=true then
   opts.scale=2;opts.quality=2;opts.auto=false;opts.performanceV16=true
+  save('classic_options.dat',opts)
+end
+-- Primera ejecucion de WorldTor 4: HD + calidad dinamica, no ULTRA.
+-- Preferencias del jugador permanecen para los siguientes arranques.
+if opts.performanceV4~=true then
+  opts.scale=2;opts.quality=2;opts.auto=true;opts.performanceV4=true
   save('classic_options.dat',opts)
 end
 local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
@@ -2123,7 +2181,7 @@ local function textScreen(title,rows,note)
   term.setTextColor(colors.yellow)
   if note then term.setCursorPos(2,h-1);term.write(note:sub(1,math.max(1,w-3))) end
   term.setCursorPos(1,h);term.setBackgroundColor(colors.gray);term.setTextColor(colors.white)
-  term.write((' WorldTor 3 / CC: Graphics '):sub(1,w)..string.rep(' ',math.max(0,w-27)))
+  term.write((' WorldTor 4 / CC: Graphics '):sub(1,w)..string.rep(' ',math.max(0,w-27)))
   term.setBackgroundColor(colors.black);term.setTextColor(colors.white)
 end
 local function ask(title,prompt)
@@ -2230,7 +2288,7 @@ local function settings()
       '[T] Calidad automatica: '..(opts.auto and 'SI' or 'NO'),
       '[V] Minimap inicial: '..(opts.minimap and 'SI' or 'NO'),
       '[1] ULTRA: escala 1 (pixeles nativos)',
-      '[2] EQUILIBRADO: escala 2 (meta 10 FPS)',
+      '[2] EQUILIBRADO: escala 2 (meta 20 FPS)',
       '[3] RAPIDO: escala 3 (menos calculos)',
       '[4] Rapido: escala 4',
       'Escala actual: '..(opts.scale or 1),
@@ -2257,13 +2315,13 @@ local function testGraphics()
   local ok,err=xpcall(function()
     assert(type(term.setGraphicsMode)=='function' and type(term.drawPixels)=='function',
       'Falta la API term.setGraphicsMode o term.drawPixels: instala CC: Graphics')
-    local wtPath=fs.combine(LIB,'worldtor3.lua')
-    assert(fs.exists(wtPath),'No se pudo instalar WorldTor 3: '..wtPath)
+    local wtPath=fs.combine(LIB,'worldtor4.lua')
+    assert(fs.exists(wtPath),'No se pudo instalar WorldTor 4: '..wtPath)
     local wtLoader,wtError=loadfile(wtPath)
-    assert(wtLoader,'WorldTor 3 no puede abrirse: '..tostring(wtError))
+    assert(wtLoader,'WorldTor 4 no puede abrirse: '..tostring(wtError))
     local wtOk,wt=pcall(wtLoader)
     assert(wtOk and type(wt)=='table' and type(wt.new3D)=='function',
-      'WorldTor 3 no puede inicializarse: '..tostring(wt))
+      'WorldTor 4 no puede inicializarse: '..tostring(wt))
     local loader,reason=loadfile(fs.combine(LIB,'classic_dungeons_renderer.lua'))
     assert(loader,reason)
     local R=assert(loader())
@@ -2275,7 +2333,7 @@ local function testGraphics()
     inst:setState(C.snapshot(s),'TEST')
     local drawn,why=inst:render(8)
     assert(drawn,why)
-    result='OK: WorldTor 3 y CC: Graphics dibujan correctamente'
+    result='OK: WorldTor 4 y CC: Graphics dibujan correctamente'
   end,function(e)return debug and debug.traceback and debug.traceback(e,2) or tostring(e) end)
   if inst then pcall(function()inst:close()end)end
   stopGraphics()
@@ -2403,9 +2461,10 @@ local function play(pid,active,isHost)
     return
   end
   local state=nil;local running=true;local started=active
-  -- Prediccion cada 0.05 s (~20 Hz); render como MAXIMO cada 0.10 s (~10 Hz).
-  -- Separar ambos evita gastar un fotograma en cada actualizacion de fisicas.
-  local ticker=os.startTimer(.05);local visualTimer=os.startTimer(.10)
+  -- WorldTor 4: 20 Hz fisicas / max 20 Hz render. Cada fotograma se
+  -- solicita por timer (no hay espera activa): si el render tarda, los FPS
+  -- reales caen por debajo de 20 en vez de bloquear el programa.
+  local ticker=os.startTimer(.05);local visualTimer=os.startTimer(.05)
   local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
   local notes={12,15,17,15,10,12,8,10};local note=0
   local lastHp=nil;local lastFloor=0
@@ -2507,7 +2566,7 @@ local function play(pid,active,isHost)
     if handle then handle.write(graphicsError);handle.close() end
     local w=term.getSize()
     textScreen('ERROR 3D - NO ES EL JUEGO',{
-      'No se pudo iniciar WorldTor 3.',
+      'No se pudo iniciar WorldTor 4.',
       '',
       graphicsError:sub(1,math.max(15,w-4)),
       'Detalle: classic_graphics_error.txt',
@@ -2560,7 +2619,7 @@ local function play(pid,active,isHost)
         predict(dt)
       end
     elseif ev=='timer' and a==visualTimer then
-      visualTimer=os.startTimer(.10)
+      visualTimer=os.startTimer(.05)
       if started and state and currentFloor then
         if renderer then
           local now=nowSeconds()
@@ -2674,7 +2733,7 @@ local function play(pid,active,isHost)
             save('classic_options.dat',opts)
             lastRender=nil
           end
-        elseif a==keys.t and renderer then renderer:toggleAuto()
+        elseif a==keys.t and renderer then renderer:toggleAuto();opts.auto=renderer.autotune;save('classic_options.dat',opts)
         end
       end
     elseif ev=='key_up' and started then
@@ -2722,7 +2781,7 @@ local function main()
     end
   end
   textScreen('WORLD STUDIOS',{'Gracias por jugar a CLASSIC DUNGEONS!',
-    'Powered by WorldTor 3'})
+    'Powered by WorldTor 4'})
 end
 local ok,reason=xpcall(main,function(err)
   if debug and debug.traceback then return debug.traceback(err,2) end
