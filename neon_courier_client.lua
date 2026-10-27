@@ -1,10 +1,10 @@
--- CLASSIC DUNGEONS 1.3 | Paquete cliente portable
--- Un archivo basta: instala Core, renderizador y WorldTor 3 INTEGRADO sin Internet.
--- CC: Graphics es un mod externo y no se instala desde Lua.
+-- CLASSIC DUNGEONS 1.4 | Cliente ULTRA auto-instalable
+-- WorldTor 3, renderizador 3D y Core incluidos. Solo CC: Graphics como mod externo.
+-- Compatibilidad con servidor 1.3; no se alteran reglas ni paquetes Rednet.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root,'classic_dungeons_runtime_1_3')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_4')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
@@ -591,22 +591,25 @@ local TEXTURES={
 }
 local MOB_TEX={rat='G',skeleton='S',cultist='V',wraith='W',brute='B',boss='Z'}
 local LOOT_TEX={potion='P',mana='N',coin='T',chest='K'}
-local function safeTxt(g,x,y,msg,col)
+local function safeTxt(g,x,y,msg,col,zoom)
+  zoom=zoom or 1
   if x<1 or y<1 or x>g.w or y>g.h then return end
-  local n=math.max(0,math.floor((g.w-x)/5.9))
+  -- WorldTor bitmap-font occupies 4 pixels per character at zoom 1.
+  local n=math.max(0,math.floor((g.w-x+1)/(4*zoom)))
   if n<1 then return end
-  g:text(x,y,tostring(msg or ''):sub(1,n),col or '#ECF0F4',1,true)
+  g:text(x,y,tostring(msg or ''):sub(1,n),col or '#ECF0F4',zoom,true)
 end
 function R.open(root,scale)
-  -- WorldTor 3 es un unico modulo integrado, sin dependencias de archivos adicionales.
+  scale=math.max(1,math.min(4,math.floor(tonumber(scale) or 1)))
+  -- All WorldTor 3 code is bundled in one module; no external paths.
   local enginePath=fs.combine(root,'worldtor3.lua')
-  local engineLoader,loadError=loadfile(enginePath)
-  assert(engineLoader,'No se encontro WorldTor integrado en '..enginePath..': '..tostring(loadError))
-  local WT=engineLoader()
-  local gfx,err=WT.new({backend='graphics',mode=2,scale=scale or 3,background='#11151D'})
+  local loader,reason=loadfile(enginePath)
+  assert(loader,'WorldTor 3 no encontrado: '..enginePath..' / '..tostring(reason))
+  local WT=loader()
+  local gfx,err=WT.new({backend='graphics',mode=2,scale=scale,background='#11151D'})
   if not gfx then return nil,err end
   local self={WT=WT,gfx=gfx,world=nil,floor=nil,snapshot=nil,myId=nil,
-    quality=2,autotune=true,scale=scale or 3,mini=false,frame=0,showFPS=0,
+    quality=1,autotune=false,scale=scale,mini=false,frame=0,showFPS=0,
     camera=nil,sprites={},swing=0}
   function self:setFloor(data)
     if type(data)~='table' or type(data.map)~='table' then return false end
@@ -619,7 +622,7 @@ function R.open(root,scale)
     w:setAutotune(self.autotune)
     w.minimap=self.mini
     w.beforeFlip=function(world,fps) self:overlay(world,fps) end
-    self.world=w;self.floor=data.floor;self.frame=0;self.snapshot=nil
+    self.world=w;self.floor=data.floor;self.floorData=data;self.frame=0;self.snapshot=nil
     self.camera=nil;self.sprites={}
     return true
   end
@@ -678,32 +681,44 @@ function R.open(root,scale)
     local p=s.players and s.players[self.myId]
     if not p then return end
     local w,h=g.w,g.h
-    g:fill(1,1,w,11,'#101720',true)
-    safeTxt(g,3,2,'CLASSIC DUNGEONS  |  PISO '..s.floor..'  '..(s.theme or ''),'#FADEA9')
-    safeTxt(g,3,7,('HP %d/%d  MANA %d/%d  POC %d  K %d'):format(p.hp,p.maxhp,p.mana,p.maxmana,p.potions,p.kills),'#BDE7C3')
+    -- Pixels native (scale 1): increase text zoom to 2 without making the
+    -- maze blocky. At lower res, use compact HUD to preserve viewport.
+    local z=(w>=180 and h>=110) and 2 or 1
+    local top=z==2 and 26 or 11
+    local bottom=z==2 and 32 or 15
+    g:fill(1,1,w,top,'#101720',true)
+    local head=('CLASSIC DUNGEONS  PISO %d'):format(s.floor or 1)
+    safeTxt(g,3,z==2 and 3 or 2,head,'#FADEA9',z)
+    local hp=('HP %d/%d  MANA %d/%d  POC %d  K %d'):format(
+      p.hp or 0,p.maxhp or 0,p.mana or 0,p.maxmana or 0,p.potions or 0,p.kills or 0)
+    safeTxt(g,3,z==2 and 16 or 7,hp,'#BDE7C3',z)
     local progress=s.puzzleDone and 'RUNAS OK' or
       ('RUNAS '..(s.runeIndex or 1)..'/'..#(s.runes or {})..'  '..table.concat(s.runeOrder or {},'-'))
     local floorText=progress..(s.bossAlive and ' | JEFE VIVO' or '')
-    g:fill(1,h-15,w,15,'#101720',true)
-    safeTxt(g,3,h-13,('PTS %d  x%d  REL %d'):format(p.score or 0,p.combo or 0,p.relics or 0),'#FCE5A6')
-    safeTxt(g,3,h-8,floorText,'#8EDDEE')
-    if w>=95 then safeTxt(g,3,h-3,'ESP GOLPE | F HECHIZO | E USAR | H POCION | R RESCATE','#A3AEBB') end
-    safeTxt(g,max(2,w-27),3,'FPS '..floor(fps or 0)..' Q'..world.quality,'#ACF3D5')
+    g:fill(1,h-bottom+1,w,bottom,'#101720',true)
+    local by1=h-(z==2 and 29 or 13)
+    local by2=h-(z==2 and 19 or 8)
+    local by3=h-(z==2 and 9 or 3)
+    safeTxt(g,3,by1,('PTS %d  x%d  REL %d'):format(p.score or 0,p.combo or 0,p.relics or 0),'#FCE5A6',z)
+    safeTxt(g,3,by2,floorText,'#8EDDEE',z)
+    safeTxt(g,3,by3,('FPS %d Q%d %dx  7:ULTRA 8:HD 9:FAST'):format(
+      math.floor(fps or 0),world.quality or 1,self.scale or 1),'#A3D9E8',z)
     if s.runes and not s.puzzleDone then
-      for _,r in ipairs(s.runes) do
-        local dd=math.sqrt((p.x-r.x)^2+(p.y-r.y)^2)
+      for _,rune in ipairs(s.runes) do
+        local dd=math.sqrt((p.x-rune.x)^2+(p.y-rune.y)^2)
         if dd<1.65 then
-          safeTxt(g,3,24,('ALTAR %d  [E] ACTIVAR  ORDEN: %d'):format(r.n,(s.runeOrder or {})[s.runeIndex or 1] or 0),'#F6E89F')
+          safeTxt(g,3,top+5,('ALTAR %d [E] ACTIVAR ORDEN %d'):format(
+            rune.n,(s.runeOrder or {})[s.runeIndex or 1] or 0),'#F6E89F',z)
           break
         end
       end
     end
     if s.exit and math.sqrt((p.x-s.exit.x)^2+(p.y-s.exit.y)^2)<1.5 then
-      safeTxt(g,3,33,'PORTAL [E] - '..(s.puzzleDone and not s.bossAlive and 'ABIERTO' or 'SELLADO'),'#78E6D0')
+      safeTxt(g,3,top+15,'PORTAL [E] - '..(s.puzzleDone and not s.bossAlive and 'ABIERTO' or 'SELLADO'),'#78E6D0',z)
     end
     if s.notice and s.notice~='' then
-      g:fill(1,13,w,9,'#3E273B',true)
-      safeTxt(g,3,15,s.notice,'#FFF0BB')
+      g:fill(1,top+1,w,7*z+2,'#3E273B',true)
+      safeTxt(g,3,top+2,s.notice,'#FFF0BB',z)
     end
     if self.swing>0 then
       local mx=math.floor(w/2)
@@ -716,7 +731,6 @@ function R.open(root,scale)
       g:center(math.floor(h*.34)+13,s.mode=='EVENT' and 'REAPARECERAS PRONTO' or 'ESPERA RESCATE','#F4E2B0',1)
     end
     if s.paused then g:center(math.floor(h*.27),'PARTIDA PAUSADA','#FFE9AC',1) end
-    -- Minimap: se reusa el motor base y solo se dibuja al activarlo.
   end
   function self:render(fps)
     if not self.world then return true end
@@ -753,6 +767,27 @@ function R.open(root,scale)
   function self:toggleMap()
     self.mini=not self.mini
     if self.world then self.world.minimap=self.mini end
+  end
+  function self:setResolution(newScale)
+    newScale=math.max(1,math.min(4,math.floor(tonumber(newScale) or self.scale)))
+    if newScale==self.scale then return true end
+    local floorData=self.floorData
+    local state=self.snapshot
+    local myId=self.myId
+    local cam=self.targetCamera
+    local current=self.camera
+    if self.gfx then self.gfx:close() end
+    self.gfx=nil
+    local gfx,err=self.WT.new({backend='graphics',mode=2,scale=newScale,background='#11151D'})
+    if not gfx then return false,err end
+    self.gfx=gfx;self.scale=newScale
+    if floorData then
+      self:setFloor(floorData)
+      if state then self:setState(state,myId) end
+      if cam then self.targetCamera=cam end
+      if current then self.camera=current end
+    end
+    return true
   end
   function self:resize()
     if self.gfx then self.gfx:resize() end
@@ -1475,11 +1510,12 @@ return function(WT)
     local r=floor(c/65536)%256;local g=floor(c/256)%256;local b=c%256
     return string.format('#%02X%02X%02X',limit(floor(r*f+.5),0,255),limit(floor(g*f+.5),0,255),limit(floor(b*f+.5),0,255))
   end
-  local function tex(fn)
+  local function tex(fn,size)
+    size=size or 16
     local out={}
-    for y=0,15 do
+    for y=0,size-1 do
       local row={}
-      for x=0,15 do row[x+1]=fn(x,y) end
+      for x=0,size-1 do row[x+1]=fn(x,y) end
       out[y+1]=row
     end
     return out
@@ -1491,36 +1527,36 @@ return function(WT)
         local grain=((x*13+y*17)%7)*3
         if joint then return '#453844' end
         return string.format('#%02X%02X%02X',110+grain,48+floor(grain/2),51+floor(grain/3))
-      end),
+      end,32),
       ['2']=tex(function(x,y)
         if x%8==0 or y%8==0 then return '#182B39' end
         if (x%8==1 and y%8==1) or (x%8==6 and y%8==6) then return '#B7D8D5' end
         local n=(x*5+y*11)%21
         return string.format('#%02X%02X%02X',57+n,87+n,105+n)
-      end),
+      end,32),
       ['3']=tex(function(x,y)
         if y%6==0 or x%9==0 then return '#343038' end
         local noise=(x*29+y*13)%23
         return string.format('#%02X%02X%02X',81+noise,79+noise,86+noise)
-      end),
+      end,32),
       D=tex(function(x,y)
-        if x==0 or x==15 or y==0 or y==15 then return '#493927' end
-        if x==7 or x==8 then return '#EEE0A3' end
-        if (y==3 or y==12) then return '#6F532D' end
+        if x==0 or x==31 or y==0 or y==31 then return '#493927' end
+        if x==15 or x==16 then return '#EEE0A3' end
+        if (y==6 or y==25) then return '#6F532D' end
         return ((x+y)%5==0) and '#9E7642' or '#BB9151'
-      end),
+      end,32),
       F=tex(function(x,y)
         if x%8==0 or y%8==0 then return '#30353F' end
         return ((x+y)%5==0) and '#626875' or '#515965'
-      end),
+      end,32),
       C=tex(function(x,y)
         if x%8==0 or y%8==0 then return '#1E2F41' end
         if (x%8==3 and y%8==3) then return '#B0DBEA' end
         return '#33495B'
-      end),
+      end,32),
       X=tex(function(x,y)
-        return (x==7 or x==8 or y==7 or y==8) and '#A0FFB5' or '#145E42'
-      end),
+        return (x==15 or x==16 or y==15 or y==16) and '#A0FFB5' or '#145E42'
+      end,32),
       M=tex(function(x,y)
         if y<3 and x>3 and x<12 then return '#FAA065' end
         if (x>=3 and x<=5 or x>=10 and x<=12) and y<8 then return '#FFE19A' end
@@ -1570,8 +1606,9 @@ return function(WT)
     end
     local function sample(mat,x,y,shade)
       local t=world._shaded[mat] or world._shaded['1']
-      local yy=(floor(y)%16)+1;local xx=(floor(x)%16)+1
-      return t[shade+1][yy][xx]
+      local rows=t[shade+1]
+      local yy=floor(y)%#rows+1;local xx=floor(x)%#rows[1]+1
+      return rows[yy][xx]
     end
     function world:prepareTextures()
       self._shaded={}
@@ -1579,9 +1616,9 @@ return function(WT)
         local variants={}
         for shade=0,7 do
           local rows={}
-          for y=1,16 do
+          for y=1,#pixels do
             rows[y]={}
-            for x=1,16 do
+            for x=1,#pixels[y] do
               local col=pixels[y] and pixels[y][x]
               if col then
                 local factor=max(.12,1-shade*.115)
@@ -1772,7 +1809,7 @@ return function(WT)
           local worldy=p.y+depth*(ray0y+(ray1y-ray0y)*t)
           local shade=self:shade(worldx,worldy,depth,0)
           local floorMaterial=self:tile(worldx,worldy)=='X' and 'X' or 'F'
-          local ix=floor(worldx*16);local iy=floor(worldy*16)
+          local ix=floor(worldx*32);local iy=floor(worldy*32)
           local floorColor=sample(floorMaterial,ix,iy,shade)
           local ceilingColor=sample('C',ix,iy,shade)
           local blockH=min(spacing,h-y+1)
@@ -1794,10 +1831,10 @@ return function(WT)
         if material then
           local hx=p.x+d*rx;local hy=p.y+d*ry
           local shade=self:shade(hx,hy,d,side)
-          local colX=limit(floor(u*16),0,15)
+          local colX=limit(floor(u*32),0,31)
           local y0=max(1,top);local y1=min(h,bottom)
           for y=y0,y1 do
-            local texY=limit(floor(((y-top)/height)*16),0,15)
+            local texY=limit(floor(((y-top)/height)*32),0,31)
             local c=sample(material,colX,texY,shade)
             paint(self.gfx,x,y,min(step,w-x+1),1,c)
           end
@@ -1919,54 +1956,47 @@ end
 end
 local WT=loadWorldTor2()
 WT=loadWorldTor3D()(WT)
-WT.version='3.0.1-portable'
+WT.version='3.0.2-ultra'
 WT.name='WorldTor 3 / CC: Graphics (integrado)'
 return WT
 
 ]=],
-
   }
-  if fs.exists(dest) and not fs.isDir(dest) then
-    error('Classic Dungeons: se esperaba una carpeta en '..dest,0)
-  end
+  if fs.exists(dest) and not fs.isDir(dest) then error('Ruta no es carpeta: '..dest,0) end
   if not fs.exists(dest) then fs.makeDir(dest) end
   for name,source in pairs(bundled) do
     local file=fs.combine(dest,name)
     local prior=nil
     if fs.exists(file) then
       if fs.isDir(file) then error('Conflicto: '..file..' es carpeta',0) end
-      local oldFile=fs.open(file,'r')
-      if oldFile then prior=oldFile.readAll();oldFile.close() end
+      local handle=fs.open(file,'r')
+      if handle then prior=handle.readAll();handle.close() end
     end
     if prior~=source then
       local temp=file..'.writing'
       if fs.exists(temp) then fs.delete(temp) end
       local fh=fs.open(temp,'w')
-      if not fh then error('No se pudo instalar '..name..' en '..file,0) end
+      if not fh then error('No se puede instalar: '..file,0) end
       fh.write(source);fh.close()
-      local verification=fs.open(temp,'r')
-      if not verification then error('No se pudo verificar '..file,0) end
-      local ok=verification.readAll()==source
-      verification.close()
-      if not ok then error('Escritura incompleta: '..file,0) end
-      -- Back up replaced libraries without touching existing user files outside runtime.
+      local verify=fs.open(temp,'r')
+      if not verify then error('No se puede leer: '..temp,0) end
+      local good=verify.readAll()==source
+      verify.close()
+      if not good then error('Escritura incompleta de '..file,0) end
       if prior~=nil then
-        local backup=file..'.backup'
-        local n=1
+        local backup=file..'.backup';local n=1
         while fs.exists(backup) do n=n+1;backup=file..'.backup'..n end
-        fs.copy(file,backup)
-        fs.delete(file)
+        fs.copy(file,backup);fs.delete(file)
       end
       fs.move(temp,file)
     end
   end
-  -- WorldTor is checked immediately, not just when entering a match.
-  local worldtorPath=fs.combine(dest,'worldtor3.lua')
-  local loader,reason=loadfile(worldtorPath)
-  if not loader then error('Error al instalar WorldTor: '..worldtorPath..' - '..tostring(reason),0) end
-  local ok,engine=pcall(loader)
-  if not ok or type(engine)~='table' or type(engine.new3D)~='function' then
-    error('Error al cargar WorldTor integrado: '..tostring(engine),0)
+  local wtFile=fs.combine(dest,'worldtor3.lua')
+  local loader,reason=loadfile(wtFile)
+  if not loader then error('WorldTor 3 no pudo abrirse: '..tostring(reason),0) end
+  local ok,wt=pcall(loader)
+  if not ok or type(wt)~='table' or type(wt.new3D)~='function' then
+    error('WorldTor 3 no pudo iniciarse: '..tostring(wt),0)
   end
   LIB=dest
  end
@@ -1991,7 +2021,13 @@ local account=load('classic_account.dat',{})
 local username=account.user or ''
 local friends=load('classic_friends.dat',{})
 local localStats=load('classic_local.dat',{runs=0,best=0,last=0,kills=0,floor=0})
-local opts=load('classic_options.dat',{music=true,sfx=true,auto=true,minimap=false,scale=3,quality=2})
+local opts=load('classic_options.dat', {music=true,sfx=true,auto=false,minimap=false,scale=1,quality=1})
+-- Migracion unica: las opciones de WorldTor 3 anteriores usaban escala 3.
+-- El nuevo preset Ultra utiliza todos los pixeles nativos de CC: Graphics.
+if opts.resolutionV14~=true then
+  opts.scale=1;opts.quality=1;opts.auto=false;opts.resolutionV14=true
+  save('classic_options.dat',opts)
+end
 local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
 local modems={}
 if peripheral and rednet and peripheral.getNames then
@@ -2134,10 +2170,11 @@ local function settings()
       '[S] Sonido: '..(opts.sfx and 'SI' or 'NO'),
       '[T] Calidad automatica: '..(opts.auto and 'SI' or 'NO'),
       '[V] Minimap inicial: '..(opts.minimap and 'SI' or 'NO'),
-      '[2] Escala 2 (mas nitida)',
-      '[3] Escala 3 (equilibrada)',
-      '[4] Escala 4 (mas rapida)',
-      'Escala actual: '..(opts.scale or 3),
+      '[1] ULTRA: escala 1 (pixeles nativos)',
+      '[2] HD: escala 2 (2.25x mas detalle que antes)',
+      '[3] Normal: escala 3 (como antes)',
+      '[4] Rapido: escala 4',
+      'Escala actual: '..(opts.scale or 1),
       '','[ESC] Volver'
     })
     local k=keyInput()
@@ -2146,6 +2183,7 @@ local function settings()
     elseif k==keys.s then opts.sfx=not opts.sfx
     elseif k==keys.t then opts.auto=not opts.auto
     elseif k==keys.v then opts.minimap=not opts.minimap
+    elseif k==keys.one then opts.scale=1
     elseif k==keys.two then opts.scale=2
     elseif k==keys.three then opts.scale=3
     elseif k==keys.four then opts.scale=4 end
@@ -2171,7 +2209,7 @@ local function testGraphics()
     assert(loader,reason)
     local R=assert(loader())
     local e
-    inst,e=R.open(LIB,opts.scale or 3)
+    inst,e=R.open(LIB,opts.scale or 1)
     assert(inst,e)
     local s=C.newRun('SOLO','NORMAL',{{id='TEST',user='PRUEBA',class='GUERRERO'}})
     assert(inst:setFloor(C.floorPacket(s)),'No acepta el mapa')
@@ -2297,7 +2335,7 @@ local function drawFallback(s,id)
 end
 local function play(pid,active,isHost)
   local state=nil;local running=true;local started=active
-  local ticker=os.startTimer(.16);local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
+  local ticker=os.startTimer(.12);local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
   local notes={12,15,17,15,10,12,8,10};local note=0
   local lastHp=nil;local lastFloor=0
   local pressed={}
@@ -2345,7 +2383,7 @@ local function play(pid,active,isHost)
       graphError('CARGA',graphicsError or 'Modulo del renderizador ausente')
       return
     end
-    local ok,r,err=pcall(rendererAPI.open,LIB,opts.scale or 3)
+    local ok,r,err=pcall(rendererAPI.open,LIB,opts.scale or 1)
     if not ok or not r then
       graphError('APERTURA',ok and err or r)
       return
@@ -2368,7 +2406,7 @@ local function play(pid,active,isHost)
     elseif ev=='timer' and a==ping then
       send({type='PING'});ping=os.startTimer(1.4)
     elseif ev=='timer' and a==ticker then
-      ticker=os.startTimer(.16)
+      ticker=os.startTimer(.12)
       if started and state and currentFloor then
         if renderer then
           local now=(os.epoch and os.epoch('utc')/1000) or os.clock()
@@ -2465,6 +2503,16 @@ local function play(pid,active,isHost)
         elseif a==keys.one and renderer then renderer:qualityLevel(1)
         elseif a==keys.two and renderer then renderer:qualityLevel(2)
         elseif a==keys.three and renderer then renderer:qualityLevel(3)
+        elseif (a==keys.seven or a==keys.eight or a==keys.nine) and renderer then
+          local targetScale=(a==keys.seven and 1) or (a==keys.eight and 2) or 3
+          local ok,changed,reason=pcall(function() return renderer:setResolution(targetScale) end)
+          if not ok or changed==false then
+            graphError('RESOLUCION',ok and reason or changed)
+          else
+            opts.scale=targetScale;opts.resolutionV14=true
+            save('classic_options.dat',opts)
+            lastRender=nil
+          end
         elseif a==keys.t and renderer then renderer:toggleAuto()
         end
       end
