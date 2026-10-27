@@ -1,15 +1,14 @@
--- CLASSIC DUNGEONS 1.4 | Cliente ULTRA auto-instalable
--- WorldTor 3, renderizador 3D y Core incluidos. Solo CC: Graphics como mod externo.
--- Compatibilidad con servidor 1.3; no se alteran reglas ni paquetes Rednet.
+-- CLASSIC DUNGEONS 1.5 | Cliente con movimiento local y red reconciliada
+-- Incluye Core + WorldTor3 + renderizador; no requiere Internet.
 local LIB
  do
   local root=fs.getDir(shell.getRunningProgram())
-  local dest=fs.combine(root,'classic_dungeons_runtime_1_4')
+  local dest=fs.combine(root,'classic_dungeons_runtime_1_5')
   local bundled={
     ['classic_dungeons_core.lua']=[=[
 -- CLASSIC DUNGEONS 1.0 | WORLD STUDIOS | Logica pura y autoritativa
--- Sin term/peripheral/rednet: toda simulacion ocurre en el servidor.
-local M={VERSION='1.0.0',PROTO='classicdungeons.v1',HOST='classic-dungeons'}
+-- Sin term/peripheral/rednet. Movimiento compartido; combate y mundo en servidor.
+local M={VERSION='1.5.0',PROTO='classicdungeons.v1',HOST='classic-dungeons'}
 local floor,abs,min,max,sqrt,cos,sin,pi=math.floor,math.abs,math.min,math.max,math.sqrt,math.cos,math.sin,math.pi
 local function clamp(v,a,b) return max(a,min(b,v)) end
 local function dst(a,b) return sqrt((a.x-b.x)^2+(a.y-b.y)^2) end
@@ -26,6 +25,16 @@ local function tile(s,x,y)
   x,y=floor(x)+1,floor(y)+1
   if not within(s,x,y) then return '1' end
   return s.grid[y][x]
+end
+-- Recrea una colision de mundo desde un FLOOR en el cliente, sin generar mapa.
+function M.mapFromPacket(packet)
+  local rows=packet and packet.map or {}
+  local grid={}
+  for y,line in ipairs(rows) do
+    grid[y]={}
+    for x=1,#line do grid[y][x]=line:sub(x,x) end
+  end
+  return {w=rows[1] and #rows[1] or 0,h=#rows,grid=grid}
 end
 function M.solid(s,x,y)
   local t=tile(s,x,y)
@@ -200,6 +209,7 @@ function M.addPlayer(s,id,user,class)
     invul=0,meleeCD=0,spellCD=0,keys={},relics=0,revives=0,shield=0}
   if p.class=='CAZADOR' then p.mana=12;p.maxmana=16
   elseif p.class=='MAGO' then p.mana=18;p.maxmana=20;p.hp=85;p.maxhp=85 end
+  p.moveSeq=0 -- Ultima posicion validada por el servidor
   s.players[p.id]=p
   return p
 end
@@ -327,7 +337,7 @@ function M.advance(s)
   s.floor=s.floor+1
   M.generate(s)
   for _,p in pairs(s.players) do
-    p.x,p.y,p.a=s.start.x,s.start.y,0;p.keys={};p.invul=2
+    p.x,p.y,p.a=s.start.x,s.start.y,0;p.keys={};p.moveSeq=0;p.invul=2
     if not p.alive and s.mode~='PVP' then p.alive=true;p.hp=max(35,floor(p.maxhp*.4)) end
     p.hp=min(p.maxhp,p.hp+18);p.mana=min(p.maxmana,p.mana+5)
     p.potions=min(7,p.potions+1);award(p,400+s.floor*45)
@@ -364,6 +374,7 @@ local function movePlayer(s,p,dt)
   M.move(s,p,(cos(p.a)*forward-sin(p.a)*lateral)*speed,
       (sin(p.a)*forward+cos(p.a)*lateral)*speed,.21)
 end
+M.stepMovement=movePlayer  -- Identica logica y colisiones para la prediccion del cliente.
 local function moveMob(s,e,target,dt)
   local dx,dy=target.x-e.x,target.y-e.y;local d=sqrt(dx*dx+dy*dy)
   if d<.75 then
@@ -415,7 +426,8 @@ function M.tick(s,dt)
     p.spellCD=max(0,p.spellCD-dt)
     p.comboTime=max(0,p.comboTime-dt);if p.comboTime==0 then p.combo=0 end
     if p.alive then
-      movePlayer(s,p,dt);living[#living+1]=p
+      -- La posicion llega del cliente y la valida el servidor en mensajes MOVE.
+      living[#living+1]=p
       p.mana=min(p.maxmana,p.mana+dt*.13)
       for _,item in ipairs(s.loot) do
         if not item.claimed and dst(p,item)<.47 and item.kind~='chest' then
@@ -489,7 +501,7 @@ function M.snapshot(s)
   local players={};for id,p in pairs(s.players) do
     players[id]={id=p.id,user=p.user,class=p.class,x=p.x,y=p.y,a=p.a,hp=p.hp,maxhp=p.maxhp,
       mana=floor(p.mana),maxmana=p.maxmana,potions=p.potions,alive=p.alive,respawn=p.respawn,
-      score=p.score,kills=p.kills,coins=p.coins,combo=p.combo,relics=p.relics,revives=p.revives,
+      score=p.score,kills=p.kills,coins=p.coins,combo=p.combo,relics=p.relics,revives=p.revives,moveSeq=p.moveSeq or 0,
       shield=p.shield,armor=p.armor,damageBonus=p.damageBonus}
   end
   local enemies={};for _,e in ipairs(s.enemies) do
@@ -674,6 +686,18 @@ function R.open(root,scale)
     end
     self.world.entities=entities
     self.sprites=liveSprites
+  end
+  -- La camara del jugador se calcula en el cliente. Saltamos la
+  -- interpolacion del propio jugador; otras entidades siguen interpoladas.
+  function self:setLocalPose(pos)
+    if not pos or not self.world or not self.snapshot then return end
+    local p=self.snapshot.players and self.snapshot.players[self.myId]
+    if p then p.x=pos.x;p.y=pos.y;p.a=pos.a end
+    self.targetCamera={x=pos.x,y=pos.y,a=pos.a}
+    self.camera={x=pos.x,y=pos.y,a=pos.a}
+    self.world.player.x=pos.x
+    self.world.player.y=pos.y
+    self.world.player.a=pos.a
   end
   function self:overlay(world,fps)
     local g=self.gfx;local s=self.snapshot
@@ -1607,7 +1631,7 @@ return function(WT)
     local function sample(mat,x,y,shade)
       local t=world._shaded[mat] or world._shaded['1']
       local rows=t[shade+1]
-      local yy=floor(y)%#rows+1;local xx=floor(x)%#rows[1]+1
+      local yy=floor(y)%#rows+1;local xx=floor(x)%(rows.width or 16)+1
       return rows[yy][xx]
     end
     function world:prepareTextures()
@@ -1615,10 +1639,10 @@ return function(WT)
       for name,pixels in pairs(self.textures) do
         local variants={}
         for shade=0,7 do
-          local rows={}
+          local rows={width=(#pixels>16 and 32 or 16)}
           for y=1,#pixels do
             rows[y]={}
-            for x=1,#pixels[y] do
+            for x=1,rows.width do
               local col=pixels[y] and pixels[y][x]
               if col then
                 local factor=max(.12,1-shade*.115)
@@ -2001,6 +2025,7 @@ return WT
   LIB=dest
  end
 
+
 -- CLASSIC DUNGEONS | Cliente World Studios + WorldTor 3 + CC: Graphics
 -- Cuenta local, amigos, partidas SOLO/COOP/PVP/EVENT, ranking, sonido, ajustes.
 local ROOT=fs.getDir(shell.getRunningProgram())
@@ -2021,11 +2046,11 @@ local account=load('classic_account.dat',{})
 local username=account.user or ''
 local friends=load('classic_friends.dat',{})
 local localStats=load('classic_local.dat',{runs=0,best=0,last=0,kills=0,floor=0})
-local opts=load('classic_options.dat', {music=true,sfx=true,auto=false,minimap=false,scale=1,quality=1})
+local opts=load('classic_options.dat', {music=true,sfx=true,auto=false,minimap=false,scale=2,quality=2})
 -- Migracion unica: las opciones de WorldTor 3 anteriores usaban escala 3.
 -- El nuevo preset Ultra utiliza todos los pixeles nativos de CC: Graphics.
 if opts.resolutionV14~=true then
-  opts.scale=1;opts.quality=1;opts.auto=false;opts.resolutionV14=true
+  opts.scale=2;opts.quality=2;opts.auto=false;opts.resolutionV14=true
   save('classic_options.dat',opts)
 end
 local speaker=(peripheral and peripheral.find) and peripheral.find('speaker') or nil
@@ -2334,11 +2359,95 @@ local function drawFallback(s,id)
   term.setCursorPos(1,h);term.write(('WASD Q/C ESP F E H R ESC'):sub(1,w))
 end
 local function play(pid,active,isHost)
+  if not serverInfo or serverInfo.netVersion~=2 then
+    textScreen('SERVIDOR ANTIGUO',{
+      'Este cliente usa movimiento instantaneo.',
+      'Debes instalar el servidor 1.5.',
+      'El servidor anterior no acepta MOVE.',
+      '', 'Pulsa una tecla para volver.'})
+    keyInput()
+    return
+  end
   local state=nil;local running=true;local started=active
-  local ticker=os.startTimer(.12);local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
+  local ticker=os.startTimer(.07);local ping=os.startTimer(1.4);local melody=os.startTimer(.75)
   local notes={12,15,17,15,10,12,8,10};local note=0
   local lastHp=nil;local lastFloor=0
   local pressed={}
+  -- Cliente = autoridad visual INMEDIATA; servidor = validacion y mundo.
+  local pose,collisionMap=nil,nil
+  local seq=0
+  local sent={} -- posiciones de secuencias pendientes para reconciliar.
+  local lastSend=0
+  local lastSim=nil
+  local lastMovePos=nil
+  local function nowSeconds()
+    return (os.epoch and os.epoch('utc')/1000) or os.clock()
+  end
+  local function installFloor(floorData)
+    collisionMap=C.mapFromPacket(floorData)
+    pose=nil;seq=0;sent={};lastSim=nil;lastMovePos=nil;lastSend=0
+  end
+  local function applyPose()
+    if not pose or not state then return end
+    local p=state.players and state.players[tostring(pid)]
+    if p then p.x=pose.x;p.y=pose.y;p.a=pose.a end
+    if renderer then renderer:setLocalPose(pose) end
+  end
+  local function predict(dt)
+    if not pose or not collisionMap or not state or state.paused or not pose.alive then return end
+    -- El motor Core comparte EXACTAMENTE las colisiones con el servidor.
+    pose.keys=pressed
+    C.stepMovement(collisionMap,pose,dt)
+    applyPose()
+    local n=nowSeconds()
+    local changed=not lastMovePos or math.abs(pose.x-lastMovePos.x)+math.abs(pose.y-lastMovePos.y)+
+      math.abs((pose.a-lastMovePos.a+math.pi)%(2*math.pi)-math.pi)>.002
+    if changed and n-lastSend>=.095 then
+      seq=seq+1
+      send({type='MOVE',floor=currentFloor.floor,seq=seq,x=pose.x,y=pose.y,a=pose.a})
+      sent[seq]={x=pose.x,y=pose.y,a=pose.a}
+      if seq>45 then sent[seq-45]=nil end -- Memoria acotada si cae la red
+      lastMovePos={x=pose.x,y=pose.y,a=pose.a}
+      lastSend=n
+      if seq>4000000 then seq=1;sent={} end
+    end
+  end
+  local function reconcile(snapshot)
+    local me=snapshot.players and snapshot.players[tostring(pid)]
+    if not me or not currentFloor or snapshot.floor~=currentFloor.floor then return end
+    if not pose then
+      pose={x=me.x,y=me.y,a=me.a,alive=me.alive,class=me.class,keys=pressed}
+    else
+      local wasDead=not pose.alive
+      pose.class=me.class
+      local ack=me.moveSeq or 0
+      local past=sent[ack]
+      if past then
+        local dx,dy=me.x-past.x,me.y-past.y
+        if math.sqrt(dx*dx+dy*dy)>.025 then
+          -- Correccion: aplicamos SOLO el error de la secuencia confirmada,
+          -- sin volver a la posicion antigua del snapshot.
+          local correction=math.min(1,.65/math.max(.001,math.sqrt(dx*dx+dy*dy)))
+          pose.x=pose.x+dx*correction
+          pose.y=pose.y+dy*correction
+          if collisionMap and C.solid(collisionMap,pose.x,pose.y) then
+            pose.x,pose.y=me.x,me.y
+          end
+        end
+        local rot=(me.a-past.a+math.pi)%(2*math.pi)-math.pi
+        if math.abs(rot)>.045 then pose.a=(pose.a+rot)%(math.pi*2) end
+      elseif seq==0 or ack==0 and seq==0 then
+        pose.x,pose.y,pose.a=me.x,me.y,me.a
+      end
+      for k in pairs(sent) do if k<=ack then sent[k]=nil end end
+      pose.alive=me.alive
+      if not me.alive or wasDead then
+        pose.x,pose.y,pose.a=me.x,me.y,me.a
+        sent={} -- Sin reconciliacion de posiciones anteriores a la resurreccion.
+      end
+    end
+    applyPose()
+  end
   local mappings={[keys.w]='w',[keys.up]='w',[keys.s]='s',[keys.down]='s',
     [keys.a]='a',[keys.left]='a',[keys.d]='d',[keys.right]='d',[keys.q]='q',[keys.c]='c'}
   local rendererAPI=nil
@@ -2406,8 +2515,12 @@ local function play(pid,active,isHost)
     elseif ev=='timer' and a==ping then
       send({type='PING'});ping=os.startTimer(1.4)
     elseif ev=='timer' and a==ticker then
-      ticker=os.startTimer(.12)
+      ticker=os.startTimer(.07)
       if started and state and currentFloor then
+        local simNow=nowSeconds()
+        local dt=lastSim and math.max(.01,math.min(.23,simNow-lastSim)) or .07
+        lastSim=simNow
+        predict(dt)
         if renderer then
           local now=(os.epoch and os.epoch('utc')/1000) or os.clock()
           local fps=lastRender and (1/math.max(.03,now-lastRender)) or 0
@@ -2431,6 +2544,7 @@ local function play(pid,active,isHost)
       if b.type=='START' then started=true;beep('ready')
       elseif b.type=='FLOOR' then
         currentFloor=b
+        installFloor(b)
         if not renderer and started and not graphicsFailed then beginGraphics() end
         if renderer then
           local ok,accepted=pcall(function() return renderer:setFloor(b) end)
@@ -2440,11 +2554,13 @@ local function play(pid,active,isHost)
         if renderer and state and state.floor==b.floor then renderer:setState(state,pid) end
       elseif b.type=='STATE' then
         state=b;started=true
+        reconcile(b)
         if currentFloor and currentFloor.floor==state.floor then
           if not renderer and not graphicsFailed then beginGraphics() end
           if renderer then
             local ok,e=pcall(function() renderer:setState(state,pid) end)
-            if not ok then graphError('ESTADO',e) end
+            if not ok then graphError('ESTADO',e)
+            elseif pose then renderer:setLocalPose(pose) end
           end
         end
         local me=state.players and state.players[tostring(pid)]
@@ -2493,8 +2609,12 @@ local function play(pid,active,isHost)
       else
         if mappings[a] and not pressed[mappings[a]] then
           pressed[mappings[a]]=true;send({type='KEY',key=mappings[a],down=true})
-        elseif a==keys.space then send({type='ACTION',action='MELEE'})
-        elseif a==keys.f then send({type='ACTION',action='SPELL'})
+        elseif a==keys.space then
+          if renderer then renderer:effect('attack') end
+          beep('attack');send({type='ACTION',action='MELEE'})
+        elseif a==keys.f then
+          if renderer then renderer:effect('attack') end
+          send({type='ACTION',action='SPELL'})
         elseif a==keys.e then send({type='ACTION',action='INTERACT'})
         elseif a==keys.h then send({type='ACTION',action='POTION'})
         elseif a==keys.r then send({type='ACTION',action='REVIVE'})
@@ -2521,7 +2641,7 @@ local function play(pid,active,isHost)
         pressed[mappings[a]]=nil;send({type='KEY',key=mappings[a],down=false})
       end
     elseif ev=='mouse_click' and started then
-      if a==1 then send({type='ACTION',action='MELEE'})
+      if a==1 then if renderer then renderer:effect('attack') end;send({type='ACTION',action='MELEE'})
       elseif a==2 then send({type='ACTION',action='SPELL'}) end
     elseif ev=='term_resize' and renderer then
       local ok=pcall(function() renderer:resize() end)
