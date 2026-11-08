@@ -1,6 +1,7 @@
 -- OMNIA / controlador.lua (CC: Tweaked)
 -- Un ordenador por funcion y por cable: STOP o REVERSE.
--- IMPORTANTE: STOP utiliza una antorcha inversora: salida 0 = clutch ENCENDIDO (parado).
+-- Clutch normal: REDSTONE ON = detenido; REDSTONE OFF = transmite giro.
+-- Se permite tambien instalacion con antorcha inversora, elegida en configuracion.
 local PROTOCOL = "omnia.v1"
 local CONFIG_FILE = "/omnia_controlador.cfg"
 local TIMEOUT = 1.6 -- segundos sin permiso de marcha => STOP
@@ -29,6 +30,14 @@ local function configurar()
   local a = tonumber(pedir("Eje/cable (1-4)", function(v) return tonumber(v) and tonumber(v)>=1 and tonumber(v)<=4 and tonumber(v)%1==0 end))
   local role = pedir("Funcion (parar / direccion)", function(v) return v=="parar" or v=="direccion" end)
   role = (role=="parar") and "stop" or "reverse"
+  local wiring
+  if role=="stop" then
+    print("Clutch normal: DIRECTO (ON = parada).")
+    print("Antorcha inversora: ANTORCHA (OFF = parada).")
+    wiring=pedir("Conexion (directo / antorcha)", function(v)
+      return v=="directo" or v=="antorcha"
+    end)
+  end
   local sides = {top=true, bottom=true, front=true, back=true, left=true, right=true}
   local side = pedir("Lado salida redstone", function(v) return sides[v] end)
   local master = tonumber(pedir("ID ordenador consola", function(v) return tonumber(v) and tonumber(v)>=0 and tonumber(v)%1==0 end))
@@ -45,7 +54,7 @@ local function configurar()
     print("Sin GPS: introduce las coords del ORDENADOR")
     pos = vec3(coord("X ordenador"),coord("Y ordenador"),coord("Z ordenador"))
   end
-  local cfg = {ring=r, axis=a, role=role, side=side, master=master,
+  local cfg = {ring=r, axis=a, role=role, wiring=wiring, side=side, master=master,
                anchor=anchor, controllerPos=pos}
   local h=assert(fs.open(CONFIG_FILE,"w"))
   h.write(textutils.serialize(cfg)); h.close()
@@ -57,6 +66,16 @@ local function cargar()
   local h=assert(fs.open(CONFIG_FILE,"r"))
   local cfg=textutils.unserialize(h.readAll()); h.close()
   assert(type(cfg)=="table" and cfg.role and cfg.master, "Configuracion corrupta")
+  -- Migracion de instalaciones previas: no asumir cableado antiguo.
+  if cfg.role=="stop" and cfg.wiring~="directo" and cfg.wiring~="antorcha" then
+    print("IMPORTANTE: nuevo control para Clutch normal de Create.")
+    print("Desacopla la transmision durante esta configuracion.")
+    cfg.wiring=pedir("Conexion (directo / antorcha)",function(v)
+      return v=="directo" or v=="antorcha"
+    end)
+    local f=assert(fs.open(CONFIG_FILE,"w"))
+    f.write(textutils.serialize(cfg)); f.close()
+  end
   return cfg
 end
 
@@ -73,8 +92,13 @@ local lastReport=-1e20
 
 local function apply()
   if cfg.role=="stop" then
-    -- INVERSOR obligatorio: salida false => antorcha ON => clutch ON => STOP
-    redstone.setOutput(cfg.side, running)
+    -- DIRECTO: redstone activa = clutch abierto = STOP.
+    -- ANTORCHA: señal activa apaga antorcha = clutch acoplado = RUN.
+    if cfg.wiring=="antorcha" then
+      redstone.setOutput(cfg.side,running)
+    else
+      redstone.setOutput(cfg.side,not running)
+    end
   else
     redstone.setOutput(cfg.side, reverse)
   end
@@ -107,7 +131,8 @@ end
 local function loop()
   print("OMNIA " .. cfg.ring .. "-" .. cfg.axis .. " " .. cfg.role)
   print("ID: "..id .."  CONSOLA: "..cfg.master)
-  print("Modo seguro activado")
+  print("Clutch: "..tostring(cfg.wiring or "no aplica"))
+  print("Parada automatica si se pierde conexion")
   while true do
     local now=os.epoch("utc")/1000
     if cfg.role=="stop" and running and
